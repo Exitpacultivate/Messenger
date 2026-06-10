@@ -184,4 +184,11 @@ mark { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2p
   .tg.view-list .main { display: none; }
   .back-btn { display: block; }
 }
+
+.b-sender { font-size: 12.5px; font-weight: 600; margin-bottom: 2px; }
+.pick-chip { background: var(--accent); color: #fff; border: none; border-radius: 12px; padding: 3px 10px;
+  font-size: 13px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; margin: 0 6px 6px 0; }
+.member-row { display: flex; align-items: center; gap: 10px; padding: 7px 4px; border-radius: 8px; }
+.member-row:hover { background: var(--hover); }
+.member-row .mr-name { flex: 1; font-size: 14.5px; }
 `;

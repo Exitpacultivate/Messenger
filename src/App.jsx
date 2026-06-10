@@ -2,9 +2,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { supabase, configured } from "./supabase.js";
 import { css } from "./styles.js";
 import { ACCENTS, WALLPAPERS, BANNERS, FRAMES, EMOJI, REACTIONS } from "./constants.js";
-import { fmtTime, fmtDay, fmtSize, findUrl, isImg, resizeImage, fileToB64, loadPrefs, storePrefs } from "./helpers.js";
+import { fmtTime, fmtDay, fmtSize, findUrl, isImg, resizeImage, resizeToBlob, fileToB64, loadPrefs, storePrefs } from "./helpers.js";
 
-const EMAIL_DOMAIN = "msgr.example.com"; // логин превращается в технический e-mail для Supabase Auth
+const EMAIL_DOMAIN = "msgr.example.com";
 const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
 
 // ============ КОМПОНЕНТЫ ============
@@ -20,6 +20,9 @@ function Avatar({ user, size = "", online = false }) {
     </div>
   );
 }
+const GroupAvatar = ({ chat, size = "" }) => (
+  <Avatar user={{ tag: (chat.title || "Г"), frame: "none" }} size={size} />
+);
 
 function Waveform({ bars, progress = 0 }) {
   return (
@@ -62,14 +65,15 @@ function highlight(text, q) {
 
 // ============ ПРИЛОЖЕНИЕ ============
 export default function App() {
-  const [phase, setPhase] = useState("loading"); // loading | auth | register | main
-  const [me, setMe] = useState(null);            // профиль текущего пользователя
-  const [profiles, setProfiles] = useState({});  // id -> профиль (кэш)
-  const [chats, setChats] = useState([]);        // мои диалоги
-  const [messages, setMessages] = useState({});  // chatId -> сообщения
-  const [reads, setReads] = useState({});        // chatId -> { userId: ts }
+  const [phase, setPhase] = useState("loading");
+  const [me, setMe] = useState(null);
+  const [profiles, setProfiles] = useState({});
+  const [chats, setChats] = useState([]);
+  const [members, setMembers] = useState({});   // chatId -> [userId] (для групп)
+  const [messages, setMessages] = useState({});
+  const [reads, setReads] = useState({});
   const [onlineIds, setOnlineIds] = useState(new Set());
-  const [typingMap, setTypingMap] = useState({}); // chatId -> ts последнего "печатает" собеседника
+  const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
   const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, ...loadPrefs() }));
@@ -80,9 +84,16 @@ export default function App() {
   const [showAttach, setShowAttach] = useState(false);
   const [emojiTab, setEmojiTab] = useState("😀");
   const [showProfile, setShowProfile] = useState(false);
-  const [showPeer, setShowPeer] = useState(false);
+  const [showChatInfo, setShowChatInfo] = useState(false);
+  const [showGroupNew, setShowGroupNew] = useState(false);
+  const [groupTitle, setGroupTitle] = useState("");
+  const [groupPicks, setGroupPicks] = useState([]);
+  const [groupQuery, setGroupQuery] = useState("");
+  const [groupResults, setGroupResults] = useState([]);
+  const [addQuery, setAddQuery] = useState("");
+  const [addResults, setAddResults] = useState([]);
   const [userQuery, setUserQuery] = useState("");
-  const [searchResults, setSearchResults] = useState(null); // null = не искали
+  const [searchResults, setSearchResults] = useState(null);
   const [chatSearch, setChatSearch] = useState(null);
   const [recording, setRecording] = useState(null);
   const [, setRecTick] = useState(0);
@@ -99,10 +110,9 @@ export default function App() {
   const audioCtxRef = useRef(null);
   const lastTypingSend = useRef(0);
   const chatChannelRef = useRef(null);
+  const lpTimer = useRef(null);
   const activeIdRef = useRef(null);
   activeIdRef.current = activeId;
-  const meRef = useRef(null);
-  meRef.current = me;
 
   const avatarInp = useRef(null);
   const mediaInp = useRef(null);
@@ -110,9 +120,11 @@ export default function App() {
   const wpInp = useRef(null);
 
   const activeChat = chats.find((c) => c.id === activeId);
-  const peerId = activeChat && (activeChat.u1 === me?.id ? activeChat.u2 : activeChat.u1);
+  const isGroup = !!activeChat?.is_group;
+  const peerId = activeChat && !isGroup && (activeChat.u1 === me?.id ? activeChat.u2 : activeChat.u1);
   const peer = peerId ? profiles[peerId] : null;
   const activeMsgs = messages[activeId] || [];
+  const activeMembers = (members[activeId] || []).map((id) => profiles[id]).filter(Boolean);
 
   function notify(text) {
     setToast(text);
@@ -137,7 +149,7 @@ export default function App() {
     storePrefs(next);
   }
 
-  // ---------- ЗАГРУЗКА ДАННЫХ ----------
+  // ---------- профили ----------
   const cacheProfiles = useCallback((list) => {
     setProfiles((p) => {
       const next = { ...p };
@@ -145,23 +157,46 @@ export default function App() {
       return next;
     });
   }, []);
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
+  const ensureProfile = useCallback(async (id) => {
+    if (!id || profilesRef.current[id]) return;
+    const { data } = await supabase.from("profiles").select("*").eq("id", id).single();
+    if (data) cacheProfiles([data]);
+  }, [cacheProfiles]);
 
+  // ---------- ЗАГРУЗКА ----------
   const loadEverything = useCallback(async (myProfile) => {
     const myId = myProfile.id;
-    const { data: chatList } = await supabase.from("chats").select("*")
-      .or(`u1.eq.${myId},u2.eq.${myId}`);
+    const { data: mem } = await supabase.from("chat_members").select("chat_id").eq("user_id", myId);
+    const memIds = (mem || []).map((m) => m.chat_id);
+    let orExpr = `u1.eq.${myId},u2.eq.${myId}`;
+    if (memIds.length) orExpr += `,id.in.(${memIds.join(",")})`;
+    const { data: chatList } = await supabase.from("chats").select("*").or(orExpr);
     const cs = chatList || [];
     setChats(cs);
 
-    const peerIds = [...new Set(cs.map((c) => (c.u1 === myId ? c.u2 : c.u1)))];
-    if (peerIds.length) {
-      const { data: peers } = await supabase.from("profiles").select("*").in("id", peerIds);
+    const gids = cs.filter((c) => c.is_group).map((c) => c.id);
+    const membersMap = {};
+    if (gids.length) {
+      const { data: allMem } = await supabase.from("chat_members").select("*").in("chat_id", gids);
+      (allMem || []).forEach((m) => { (membersMap[m.chat_id] ||= []).push(m.user_id); });
+    }
+    setMembers(membersMap);
+
+    const pids = new Set();
+    cs.forEach((c) => { if (!c.is_group) pids.add(c.u1 === myId ? c.u2 : c.u1); });
+    Object.values(membersMap).flat().forEach((id) => pids.add(id));
+    pids.delete(myId); pids.delete(null); pids.delete(undefined);
+    if (pids.size) {
+      const { data: peers } = await supabase.from("profiles").select("*").in("id", [...pids]);
       cacheProfiles(peers || []);
     }
+
     if (cs.length) {
       const ids = cs.map((c) => c.id);
       const { data: msgs } = await supabase.from("messages").select("*")
-        .in("chat_id", ids).order("created_at", { ascending: false }).limit(600);
+        .in("chat_id", ids).order("created_at", { ascending: false }).limit(800);
       const byChat = {};
       (msgs || []).reverse().forEach((m) => { (byChat[m.chat_id] ||= []).push(m); });
       setMessages(byChat);
@@ -173,14 +208,14 @@ export default function App() {
     }
   }, [cacheProfiles]);
 
-  // ---------- СТАРТ: сессия ----------
+  // ---------- СТАРТ ----------
   useEffect(() => {
     if (!configured) { setPhase("config"); return; }
     (async () => {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) { setPhase("auth"); return; }
       const { data: prof } = await supabase.from("profiles").select("*").eq("id", session.user.id).single();
-      if (!prof) { setPhase("register"); setRegStep(2); return; } // аккаунт есть, тег не выбран
+      if (!prof) { setPhase("register"); setRegStep(2); return; }
       setMe(prof);
       cacheProfiles([prof]);
       await loadEverything(prof);
@@ -188,13 +223,14 @@ export default function App() {
     })();
   }, [loadEverything, cacheProfiles]);
 
-  // ---------- REALTIME: сообщения, чаты, прочитанность ----------
+  // ---------- REALTIME ----------
   useEffect(() => {
     if (phase !== "main" || !me) return;
     const ch = supabase
       .channel("db-stream")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (p) => {
         const m = p.new;
+        ensureProfile(m.sender_id);
         setMessages((d) => {
           const list = d[m.chat_id] || [];
           if (list.some((x) => x.id === m.id)) return d;
@@ -213,14 +249,41 @@ export default function App() {
           return next;
         });
       })
-      .on("postgres_changes", { event: "*", schema: "public", table: "chats" }, async (p) => {
+      .on("postgres_changes", { event: "*", schema: "public", table: "chats" }, (p) => {
         const c = p.new;
-        if (!c || (c.u1 !== me.id && c.u2 !== me.id)) return;
-        setChats((cs) => (cs.some((x) => x.id === c.id) ? cs.map((x) => (x.id === c.id ? c : x)) : [...cs, c]));
-        const pid = c.u1 === me.id ? c.u2 : c.u1;
-        if (!profiles[pid]) {
-          const { data: u } = await supabase.from("profiles").select("*").eq("id", pid).single();
-          if (u) cacheProfiles([u]);
+        if (!c) return;
+        setChats((cs) => (cs.some((x) => x.id === c.id) ? cs.map((x) => (x.id === c.id ? c : x)) : cs));
+        if (!c.is_group && (c.u1 === me.id || c.u2 === me.id)) {
+          setChats((cs) => (cs.some((x) => x.id === c.id) ? cs : [...cs, c]));
+          ensureProfile(c.u1 === me.id ? c.u2 : c.u1);
+        }
+      })
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_members" }, async (p) => {
+        const r = p.new;
+        if (r.user_id === me.id) {
+          // меня добавили в группу — подтягиваем её целиком
+          const { data: chat } = await supabase.from("chats").select("*").eq("id", r.chat_id).single();
+          if (!chat) return;
+          setChats((cs) => (cs.some((x) => x.id === chat.id) ? cs : [...cs, chat]));
+          const { data: mm } = await supabase.from("chat_members").select("*").eq("chat_id", chat.id);
+          const ids = (mm || []).map((m) => m.user_id);
+          setMembers((d) => ({ ...d, [chat.id]: ids }));
+          ids.forEach(ensureProfile);
+          const { data: msgs } = await supabase.from("messages").select("*").eq("chat_id", chat.id)
+            .order("created_at", { ascending: false }).limit(200);
+          setMessages((d) => ({ ...d, [chat.id]: (msgs || []).reverse() }));
+        } else {
+          setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: [...new Set([...d[r.chat_id], r.user_id])] } : d));
+          ensureProfile(r.user_id);
+        }
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_members" }, (p) => {
+        const r = p.old;
+        if (r.user_id === me.id) {
+          setChats((cs) => cs.filter((c) => c.id !== r.chat_id));
+          if (activeIdRef.current === r.chat_id) setActiveId(null);
+        } else {
+          setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: d[r.chat_id].filter((x) => x !== r.user_id) } : d));
         }
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "chat_reads" }, (p) => {
@@ -233,7 +296,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, me?.id]);
 
-  // ---------- PRESENCE: кто онлайн ----------
+  // ---------- PRESENCE ----------
   useEffect(() => {
     if (phase !== "main" || !me) return;
     const ch = supabase.channel("online", { config: { presence: { key: me.id } } });
@@ -248,23 +311,30 @@ export default function App() {
     return () => { clearInterval(beat); supabase.removeChannel(ch); };
   }, [phase, me?.id]);
 
-  // ---------- КАНАЛ АКТИВНОГО ЧАТА: "печатает" ----------
+  // ---------- "печатает" в активном чате ----------
   useEffect(() => {
     if (phase !== "main" || !activeId || !me) return;
     const ch = supabase.channel(`chat-${activeId}`);
     ch.on("broadcast", { event: "typing" }, (p) => {
-      if (p.payload?.user !== me.id) setTypingMap((t) => ({ ...t, [activeId]: Date.now() }));
+      const uid = p.payload?.user;
+      if (uid && uid !== me.id) {
+        setTypingMap((t) => ({ ...t, [activeId]: { ...(t[activeId] || {}), [uid]: Date.now() } }));
+        ensureProfile(uid);
+      }
     }).subscribe();
     chatChannelRef.current = ch;
     return () => { chatChannelRef.current = null; supabase.removeChannel(ch); };
-  }, [phase, activeId, me?.id]);
+  }, [phase, activeId, me?.id, ensureProfile]);
 
   function notifyTyping() {
     if (!chatChannelRef.current || Date.now() - lastTypingSend.current < 2500) return;
     lastTypingSend.current = Date.now();
     chatChannelRef.current.send({ type: "broadcast", event: "typing", payload: { user: me.id } });
   }
-  const peerTyping = (typingMap[activeId] || 0) > Date.now() - 5000;
+  const typingNames = Object.entries(typingMap[activeId] || {})
+    .filter(([, ts]) => ts > Date.now() - 5000)
+    .map(([uid]) => profiles[uid]?.login)
+    .filter(Boolean);
 
   // ---------- прочитанность ----------
   useEffect(() => {
@@ -331,33 +401,38 @@ export default function App() {
   async function logout() {
     await supabase.auth.signOut();
     setMe(null); setActiveId(null); setShowProfile(false);
-    setChats([]); setMessages({}); setLogin(""); setPass("");
+    setChats([]); setMessages({}); setMembers({}); setLogin(""); setPass("");
     setPhase("auth");
   }
 
-  // ---------- ПОИСК ПОЛЬЗОВАТЕЛЕЙ (по запросу, с задержкой) ----------
-  useEffect(() => {
-    if (phase !== "main") return;
-    const q = userQuery.trim().replace(/^@/, "");
-    if (!q) { setSearchResults(null); return; }
-    const t = setTimeout(async () => {
-      const { data } = await supabase.from("profiles").select("*")
-        .or(`tag.ilike.%${q}%,login.ilike.%${q}%`).neq("id", me.id).limit(15);
-      setSearchResults(data || []);
-    }, 350);
-    return () => clearTimeout(t);
-  }, [userQuery, phase, me?.id]);
+  // ---------- ПОИСК ЛЮДЕЙ ----------
+  function useUserSearch(query, setResults, extraFilter) {
+    useEffect(() => {
+      if (phase !== "main") return;
+      const q = query.trim().replace(/^@/, "");
+      if (!q) { setResults(query === "" ? null : []); return; }
+      const t = setTimeout(async () => {
+        const { data } = await supabase.from("profiles").select("*")
+          .or(`tag.ilike.%${q}%,login.ilike.%${q}%`).neq("id", me.id).limit(15);
+        setResults((data || []).filter(extraFilter || (() => true)));
+      }, 350);
+      return () => clearTimeout(t);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [query, phase]);
+  }
+  useUserSearch(userQuery, setSearchResults);
+  useUserSearch(groupQuery, setGroupResults, (u) => !groupPicks.some((p) => p.id === u.id));
+  useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).includes(u.id));
 
   async function startChat(user) {
     cacheProfiles([user]);
-    let chat = chats.find((c) => c.u1 === user.id || c.u2 === user.id);
+    let chat = chats.find((c) => !c.is_group && (c.u1 === user.id || c.u2 === user.id));
     if (!chat) {
       const [a, b] = [me.id, user.id].sort();
       const { data, error } = await supabase.from("chats").insert({ u1: a, u2: b }).select().single();
       if (error) {
-        // возможно, чат уже создал собеседник
         const { data: existing } = await supabase.from("chats").select("*")
-          .or(`and(u1.eq.${a},u2.eq.${b}),and(u1.eq.${b},u2.eq.${a})`).single();
+          .or(`and(u1.eq.${a},u2.eq.${b}),and(u1.eq.${b},u2.eq.${a})`).limit(1).single();
         if (!existing) { notify("Не удалось создать чат."); return; }
         chat = existing;
       } else chat = data;
@@ -367,15 +442,54 @@ export default function App() {
     openChat(chat.id);
   }
 
+  // ---------- ГРУППЫ ----------
+  async function createGroup() {
+    const title = groupTitle.trim();
+    if (!title) { notify("Дайте группе название."); return; }
+    if (!groupPicks.length) { notify("Добавьте хотя бы одного участника."); return; }
+    const { data: chat, error } = await supabase.from("chats")
+      .insert({ is_group: true, title, u1: me.id, owner: me.id }).select().single();
+    if (error) { notify("Не удалось создать группу."); return; }
+    const ids = [me.id, ...groupPicks.map((p) => p.id)];
+    const { error: e2 } = await supabase.from("chat_members").insert(ids.map((uid) => ({ chat_id: chat.id, user_id: uid })));
+    if (e2) { notify("Группа создана, но участники не добавились. Добавьте их в настройках группы."); }
+    cacheProfiles(groupPicks);
+    setMembers((m) => ({ ...m, [chat.id]: ids }));
+    setChats((cs) => (cs.some((x) => x.id === chat.id) ? cs : [...cs, chat]));
+    setShowGroupNew(false); setGroupTitle(""); setGroupPicks([]); setGroupQuery("");
+    openChat(chat.id);
+  }
+  async function addMember(user) {
+    const { error } = await supabase.from("chat_members").insert({ chat_id: activeId, user_id: user.id });
+    if (error) { notify("Не удалось добавить."); return; }
+    cacheProfiles([user]);
+    setMembers((m) => ({ ...m, [activeId]: [...new Set([...(m[activeId] || []), user.id])] }));
+    setAddQuery(""); setAddResults(null);
+    notify(`${user.login} добавлен(а) ✓`);
+  }
+  async function leaveGroup() {
+    const { error } = await supabase.from("chat_members").delete().eq("chat_id", activeId).eq("user_id", me.id);
+    if (error) { notify("Не удалось выйти."); return; }
+    setShowChatInfo(false);
+    setChats((cs) => cs.filter((c) => c.id !== activeId));
+    setActiveId(null);
+  }
+  async function kickMember(uid) {
+    const { error } = await supabase.from("chat_members").delete().eq("chat_id", activeId).eq("user_id", uid);
+    if (error) { notify("Не удалось удалить участника."); return; }
+    setMembers((m) => ({ ...m, [activeId]: (m[activeId] || []).filter((x) => x !== uid) }));
+  }
+
   function openChat(id) {
     if (activeId) setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: draft } });
     setActiveId(id);
     setDraft(prefs.drafts?.[id] || "");
-    setReplyTo(null); setChatSearch(null); setShowEmoji(false); setShowAttach(false);
+    setReplyTo(null); setChatSearch(null); setShowEmoji(false); setShowAttach(false); setShowChatInfo(false);
   }
 
   // ---------- СООБЩЕНИЯ ----------
   const senderName = (m) => (m.sender_id === me?.id ? "Вы" : profiles[m.sender_id]?.login || "?");
+  const senderColor = (id) => ACCENTS[(id?.charCodeAt(2) || 0) % ACCENTS.length];
   const previewOf = (m) => m.type === "text" ? m.content.slice(0, 60) : { photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "";
 
   async function sendMessage(payload) {
@@ -387,8 +501,7 @@ export default function App() {
     };
     setReplyTo(null);
     const { error } = await supabase.from("messages").insert(row);
-    if (error) notify(error.message.includes("payload") || error.message.includes("too large")
-      ? "Файл слишком большой." : "Не удалось отправить, проверьте интернет.");
+    if (error) notify(error.message.includes("too large") ? "Файл слишком большой." : "Не удалось отправить, проверьте интернет.");
   }
   function sendText(text) {
     const t = (text ?? draft).trim();
@@ -400,26 +513,51 @@ export default function App() {
       setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: "" } });
     }
   }
+  // Загрузка медиа в Storage: в сообщении хранится лишь ссылка,
+  // поэтому realtime доставляет его мгновенно независимо от размера файла
+  async function uploadMedia(blob, ext, contentType) {
+    const path = `${me.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error } = await supabase.storage.from("media").upload(path, blob, { contentType, upsert: false });
+    if (error) throw error;
+    return supabase.storage.from("media").getPublicUrl(path).data.publicUrl;
+  }
+  const extOf = (name, fallback) => (name?.includes(".") ? name.split(".").pop().slice(0, 8) : fallback);
+
   async function handleMedia(file) {
     if (!file) return;
     try {
       if (file.type.startsWith("image/")) {
-        const data = await resizeImage(file, 1100, 0.78);
-        await sendMessage({ type: "photo", content: data, file_name: file.name });
+        notify("Загружаем фото…");
+        const blob = await resizeToBlob(file, 1100, 0.78);
+        const url = await uploadMedia(blob, "jpg", "image/jpeg");
+        await sendMessage({ type: "photo", content: url, file_name: file.name });
       } else if (file.type.startsWith("video/")) {
-        if (file.size > 8 * 1048576) { notify("Видео больше 8 МБ — пока не поддерживается."); return; }
-        await sendMessage({ type: "video", content: await fileToB64(file), file_name: file.name, file_size: file.size });
+        if (file.size > 25 * 1048576) { notify("Видео больше 25 МБ — не поместится."); return; }
+        notify("Загружаем видео…");
+        const url = await uploadMedia(file, extOf(file.name, "mp4"), file.type || "video/mp4");
+        await sendMessage({ type: "video", content: url, file_name: file.name, file_size: file.size });
       }
-    } catch { notify("Не удалось обработать файл."); }
+    } catch (e) {
+      console.error(e);
+      notify(String(e?.message || "").includes("Bucket not found")
+        ? "Хранилище медиа не настроено: выполните миграцию из supabase-migration-groups.sql."
+        : "Не удалось загрузить файл.");
+    }
   }
   async function handleFile(file) {
     if (!file) return;
     try {
       if (file.type.startsWith("image/") || file.type.startsWith("video/")) { await handleMedia(file); return; }
-      if (file.size > 8 * 1048576) { notify("Файл больше 8 МБ — пока не поддерживается."); return; }
-      const data = await fileToB64(file);
-      await sendMessage({ type: "file", content: data, file_name: file.name, file_size: file.size });
-    } catch { notify("Не удалось обработать файл."); }
+      if (file.size > 25 * 1048576) { notify("Файл больше 25 МБ — не поместится."); return; }
+      notify("Загружаем файл…");
+      const url = await uploadMedia(file, extOf(file.name, "bin"), file.type || "application/octet-stream");
+      await sendMessage({ type: "file", content: url, file_name: file.name, file_size: file.size });
+    } catch (e) {
+      console.error(e);
+      notify(String(e?.message || "").includes("Bucket not found")
+        ? "Хранилище медиа не настроено: выполните миграцию из supabase-migration-groups.sql."
+        : "Не удалось загрузить файл.");
+    }
   }
   async function startVoice() {
     setShowAttach(false);
@@ -433,10 +571,12 @@ export default function App() {
         stream.getTracks().forEach((t) => t.stop());
         if (!rec._send) return;
         const blob = new Blob(chunks, { type: rec.mimeType });
-        if (blob.size > 5 * 1048576) { notify("Запись слишком длинная."); return; }
-        const data = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
-        const dur = Math.max(1, Math.round((Date.now() - startTs) / 1000));
-        await sendMessage({ type: "voice", content: data, duration: dur, waveform: Array.from({ length: 28 }, () => 5 + Math.round(Math.random() * 16)) });
+        if (blob.size > 15 * 1048576) { notify("Запись слишком длинная."); return; }
+        try {
+          const url = await uploadMedia(blob, "webm", rec.mimeType || "audio/webm");
+          const dur = Math.max(1, Math.round((Date.now() - startTs) / 1000));
+          await sendMessage({ type: "voice", content: url, duration: dur, waveform: Array.from({ length: 28 }, () => 5 + Math.round(Math.random() * 16)) });
+        } catch (e) { console.error(e); notify("Не удалось загрузить голосовое."); }
       };
       rec.start();
       setRecording({ recorder: rec, start: startTs });
@@ -462,6 +602,8 @@ export default function App() {
     r[emoji] = list.includes(me.id) ? list.filter((x) => x !== me.id) : [...list, me.id];
     if (!r[emoji].length) delete r[emoji];
     setMenu(null);
+    // мгновенно показываем локально, сервер догонит
+    setMessages((d) => ({ ...d, [msg.chat_id]: (d[msg.chat_id] || []).map((x) => (x.id === msg.id ? { ...x, reactions: r } : x)) }));
     const { error } = await supabase.from("messages").update({ reactions: r }).eq("id", msg.id);
     if (error) notify("Не удалось поставить реакцию.");
   }
@@ -477,6 +619,14 @@ export default function App() {
     if (error) notify("Не удалось закрепить.");
     else setChats((cs) => cs.map((c) => (c.id === activeId ? { ...c, pinned_msg: next } : c)));
   }
+  function openMenuAt(x, y, m) {
+    setMenu({ x: Math.min(x, window.innerWidth - 190), y: Math.min(y, window.innerHeight - 290), msg: m });
+  }
+  function bubbleTouchStart(e, m) {
+    const t = e.touches[0];
+    lpTimer.current = setTimeout(() => openMenuAt(t.clientX, t.clientY, m), 450);
+  }
+  function bubbleTouchCancel() { clearTimeout(lpTimer.current); }
 
   // ---------- ПРОФИЛЬ ----------
   async function saveProfile(patch) {
@@ -510,6 +660,7 @@ export default function App() {
     if (d < 86400000) return "был(а) сегодня";
     return `был(а) ${new Date(u.last_seen).toLocaleDateString("ru-RU")}`;
   };
+  const chatTitle = (c) => c.is_group ? (c.title || "Группа") : (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…");
 
   const themeVars = {
     "--accent": prefs.accent,
@@ -531,12 +682,11 @@ export default function App() {
         <style>{css}</style>
         <div className="auth-wrap"><div className="auth-box">
           <h1>Почти готово</h1>
-          <p className="sub">Приложение не подключено к базе. Добавьте переменные VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в настройках Vercel (Settings → Environment Variables) и пересоберите проект. Подробности — в файле ИНСТРУКЦИЯ.md.</p>
+          <p className="sub">Приложение не подключено к базе. Добавьте переменные VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в настройках Vercel и пересоберите проект (Redeploy).</p>
         </div></div>
       </div>
     );
   }
-
   if (phase === "loading") {
     return (
       <div className="tg" data-theme={prefs.theme} style={{ ...themeVars, display: "block" }}>
@@ -545,7 +695,6 @@ export default function App() {
       </div>
     );
   }
-
   if (phase === "auth" || phase === "register") {
     const isReg = phase === "register";
     return (
@@ -619,9 +768,10 @@ export default function App() {
           <button className="icon-btn" title="Профиль и настройки" onClick={() => setShowProfile(true)}>☰</button>
           <input className="search-input" placeholder="Найти по @тегу…" value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)} />
+          <button className="icon-btn" title="Создать группу" onClick={() => setShowGroupNew(true)}>👥</button>
         </div>
         <div className="chats">
-          {searchResults !== null ? (
+          {searchResults !== null && userQuery.trim() ? (
             searchResults.length ? searchResults.map((u) => (
               <div className="chat-item" key={u.id} onClick={() => startChat(u)}>
                 <Avatar user={u} online={isOn(u)} />
@@ -634,20 +784,22 @@ export default function App() {
             )) : <p className="muted" style={{ padding: 20, textAlign: "center", fontSize: 14 }}>Никого не нашлось. Проверьте @тег.</p>
           ) : sortedChats.length ? (
             sortedChats.map((c) => {
-              const pid = c.u1 === me.id ? c.u2 : c.u1;
-              const p = profiles[pid];
+              const p = c.is_group ? null : profiles[c.u1 === me.id ? c.u2 : c.u1];
               const last = lastMsgOf(c);
               const n = unreadCount(c);
+              const lastLabel = last
+                ? `${last.sender_id === me.id ? "Вы" : (c.is_group ? (profiles[last.sender_id]?.login || "…") : "")}${last.sender_id === me.id || c.is_group ? ": " : ""}${previewOf(last)}`
+                : c.is_group ? "Группа создана" : "Чат создан";
               return (
                 <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id} onClick={() => openChat(c.id)}>
-                  <Avatar user={p} online={isOn(p)} />
+                  {c.is_group ? <GroupAvatar chat={c} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
-                      <span className="ci-name">{p?.login || "…"}</span>
+                      <span className="ci-name">{c.is_group && "👥 "}{chatTitle(c)}</span>
                       <span className="ci-time">{last ? fmtTime(last.created_at) : ""}</span>
                     </div>
                     <div className="ci-row">
-                      <span className="ci-last">{prefs.drafts?.[c.id] ? `✏️ ${prefs.drafts[c.id].slice(0, 40)}` : last ? `${last.sender_id === me.id ? "Вы: " : ""}${previewOf(last)}` : "Чат создан"}</span>
+                      <span className="ci-last">{prefs.drafts?.[c.id] ? `✏️ ${prefs.drafts[c.id].slice(0, 40)}` : lastLabel}</span>
                       {n > 0 && <span className="badge">{n}</span>}
                     </div>
                   </div>
@@ -656,7 +808,7 @@ export default function App() {
             })
           ) : (
             <p className="muted" style={{ padding: 24, textAlign: "center", fontSize: 14 }}>
-              Чатов пока нет.<br />Найдите собеседника по @тегу через поиск сверху.
+              Чатов пока нет.<br />Найдите собеседника по @тегу или создайте группу (👥).
             </p>
           )}
         </div>
@@ -669,11 +821,20 @@ export default function App() {
         ) : (<>
           <div className="chat-head">
             <button className="icon-btn back-btn" onClick={() => setActiveId(null)}>←</button>
-            <div onClick={() => setShowPeer(true)} style={{ cursor: "pointer" }}><Avatar user={peer} size="sm" /></div>
-            <div className="ch-info" onClick={() => setShowPeer(true)} title="Открыть профиль">
-              <div className="ch-name">{peer?.login} <span className="muted" style={{ fontWeight: 400, fontSize: 13 }}>@{peer?.tag}</span></div>
-              <div className={`ch-status${isOn(peer) || peerTyping ? " on" : ""}`}>
-                {peerTyping ? "печатает…" : lastSeenText(peer)}
+            <div onClick={() => setShowChatInfo(true)} style={{ cursor: "pointer" }}>
+              {isGroup ? <GroupAvatar chat={activeChat} size="sm" /> : <Avatar user={peer} size="sm" />}
+            </div>
+            <div className="ch-info" onClick={() => setShowChatInfo(true)} title={isGroup ? "Об этой группе" : "Открыть профиль"}>
+              <div className="ch-name">
+                {chatTitle(activeChat)}
+                {!isGroup && <span className="muted" style={{ fontWeight: 400, fontSize: 13 }}> @{peer?.tag}</span>}
+              </div>
+              <div className={`ch-status${(isGroup ? typingNames.length : (isOn(peer) || typingNames.length)) ? " on" : ""}`}>
+                {typingNames.length
+                  ? `${typingNames.join(", ")} печатает…`
+                  : isGroup
+                    ? `${activeMembers.length} участников${activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}`
+                    : lastSeenText(peer)}
               </div>
             </div>
             <button className="icon-btn" title="Поиск по чату" onClick={() => setChatSearch(chatSearch === null ? "" : null)}>🔍</button>
@@ -700,15 +861,21 @@ export default function App() {
               const ts = new Date(m.created_at).getTime();
               const newDay = !prev || new Date(prev.created_at).toDateString() !== new Date(m.created_at).toDateString();
               const out = m.sender_id === me.id;
-              const read = out && peer && (reads[activeId]?.[peer.id] || 0) >= ts;
+              const othersRead = Object.entries(reads[activeId] || {}).some(([uid, t]) => uid !== me.id && t >= ts);
               const url = m.type === "text" ? findUrl(m.content) : null;
               const showAsPhoto = m.type === "photo" || (m.type === "file" && isImg(m));
+              const showSender = isGroup && !out && (!prev || prev.sender_id !== m.sender_id);
               return (
                 <div key={m.id}>
                   {newDay && <div style={{ display: "flex", justifyContent: "center" }}><span className="day-sep">{fmtDay(m.created_at)}</span></div>}
                   <div className={`bubble-row ${out ? "out" : "in"}`}>
                     <div className={`bubble ${out ? "out" : "in"}`}
-                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: Math.min(e.clientX, window.innerWidth - 190), y: Math.min(e.clientY, window.innerHeight - 290), msg: m }); }}>
+                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openMenuAt(e.clientX, e.clientY, m); }}
+                      onDoubleClick={() => toggleReaction(m, "❤️")}
+                      onTouchStart={(e) => bubbleTouchStart(e, m)}
+                      onTouchEnd={bubbleTouchCancel}
+                      onTouchMove={bubbleTouchCancel}>
+                      {showSender && <div className="b-sender" style={{ color: senderColor(m.sender_id) }}>{profiles[m.sender_id]?.login || "…"}</div>}
                       {m.reply_to && <div className="reply-quote"><b>{m.reply_to.name}</b>{m.reply_to.text}</div>}
                       {m.type === "text" && <span>{highlight(m.content, chatSearch || "")}</span>}
                       {showAsPhoto && <img className="b-img" src={m.content} alt="" onClick={() => setViewer(m.content)} />}
@@ -732,7 +899,7 @@ export default function App() {
                       )}
                       <div className="b-meta">
                         {fmtTime(m.created_at)}
-                        {out && <span className={`ticks${read ? " read" : ""}`}>✓✓</span>}
+                        {out && <span className={`ticks${othersRead ? " read" : ""}`}>✓✓</span>}
                       </div>
                     </div>
                   </div>
@@ -813,20 +980,92 @@ export default function App() {
         </div>
       )}
 
-      {/* ПРОФИЛЬ СОБЕСЕДНИКА */}
-      {showPeer && peer && (
-        <div className="overlay" onClick={() => setShowPeer(false)}>
+      {/* СОЗДАНИЕ ГРУППЫ */}
+      {showGroupNew && (
+        <div className="overlay" onClick={() => setShowGroupNew(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="banner" style={{ background: BANNERS[peer.banner] || BANNERS[0] }}>
-              <Avatar user={peer} size="lg" />
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>Новая группа</h3>
+              <input className="field" placeholder="Название группы" maxLength={50} value={groupTitle}
+                onChange={(e) => setGroupTitle(e.target.value)} autoFocus />
+              {groupPicks.length > 0 && (
+                <div style={{ marginBottom: 8 }}>
+                  {groupPicks.map((p) => (
+                    <button key={p.id} className="pick-chip" onClick={() => setGroupPicks(groupPicks.filter((x) => x.id !== p.id))}>
+                      {p.login} ✕
+                    </button>
+                  ))}
+                </div>
+              )}
+              <input className="field" placeholder="Найти участника по @тегу…" value={groupQuery}
+                onChange={(e) => setGroupQuery(e.target.value)} />
+              {(groupResults || []).map((u) => (
+                <div className="member-row" key={u.id} style={{ cursor: "pointer" }}
+                  onClick={() => { setGroupPicks([...groupPicks, u]); setGroupQuery(""); }}>
+                  <Avatar user={u} size="sm" online={isOn(u)} />
+                  <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
+                  <span className="badge">＋</span>
+                </div>
+              ))}
+              <button className="btn" style={{ marginTop: 10 }} onClick={createGroup}
+                disabled={!groupTitle.trim() || !groupPicks.length}>Создать группу</button>
+              <button className="btn ghost" onClick={() => setShowGroupNew(false)}>Отмена</button>
             </div>
-            <div className="modal-pad" style={{ paddingTop: 58 }}>
-              <div style={{ fontWeight: 700, fontSize: 19 }}>{peer.login}</div>
-              <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
-              {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
-              <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
-              <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowPeer(false)}>Закрыть</button>
-            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ИНФО О ЧАТЕ / ПРОФИЛЬ СОБЕСЕДНИКА */}
+      {showChatInfo && activeChat && (
+        <div className="overlay" onClick={() => { setShowChatInfo(false); setAddQuery(""); }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            {isGroup ? (
+              <div className="modal-pad">
+                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+                  <GroupAvatar chat={activeChat} size="lg" />
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 19 }}>{activeChat.title}</div>
+                    <div className="muted" style={{ fontSize: 14 }}>{activeMembers.length} участников</div>
+                  </div>
+                </div>
+                <h3>Участники</h3>
+                {activeMembers.map((u) => (
+                  <div className="member-row" key={u.id}>
+                    <Avatar user={u} size="sm" online={isOn(u)} />
+                    <span className="mr-name">
+                      {u.login} {u.id === activeChat.owner && "👑"} {u.id === me.id && <span className="muted">(вы)</span>}
+                    </span>
+                    {activeChat.owner === me.id && u.id !== me.id && (
+                      <button className="icon-btn" title="Удалить из группы" style={{ fontSize: 14 }} onClick={() => kickMember(u.id)}>✕</button>
+                    )}
+                  </div>
+                ))}
+                <h3>Добавить участника</h3>
+                <input className="field" placeholder="Поиск по @тегу…" value={addQuery} onChange={(e) => setAddQuery(e.target.value)} />
+                {(addResults || []).map((u) => (
+                  <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => addMember(u)}>
+                    <Avatar user={u} size="sm" online={isOn(u)} />
+                    <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
+                    <span className="badge">＋</span>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <button className="btn" style={{ background: "#D9534F" }} onClick={leaveGroup}>Покинуть группу</button>
+                  <button className="btn ghost" onClick={() => setShowChatInfo(false)}>Закрыть</button>
+                </div>
+              </div>
+            ) : peer ? (<>
+              <div className="banner" style={{ background: BANNERS[peer.banner] || BANNERS[0] }}>
+                <Avatar user={peer} size="lg" />
+              </div>
+              <div className="modal-pad" style={{ paddingTop: 58 }}>
+                <div style={{ fontWeight: 700, fontSize: 19 }}>{peer.login}</div>
+                <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
+                {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
+                <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
+                <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowChatInfo(false)}>Закрыть</button>
+              </div>
+            </>) : null}
           </div>
         </div>
       )}
