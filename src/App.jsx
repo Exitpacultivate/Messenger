@@ -1,0 +1,919 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { supabase, configured } from "./supabase.js";
+import { css } from "./styles.js";
+import { ACCENTS, WALLPAPERS, BANNERS, FRAMES, EMOJI, REACTIONS } from "./constants.js";
+import { fmtTime, fmtDay, fmtSize, findUrl, isImg, resizeImage, fileToB64, loadPrefs, storePrefs } from "./helpers.js";
+
+const EMAIL_DOMAIN = "msgr.example.com"; // логин превращается в технический e-mail для Supabase Auth
+const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
+
+// ============ КОМПОНЕНТЫ ============
+function Avatar({ user, size = "", online = false }) {
+  const color = ACCENTS[(user?.tag?.length || 0) % ACCENTS.length];
+  const frame = FRAMES.find((f) => f.id === user?.frame) || FRAMES[0];
+  return (
+    <div className="ava-frame" style={{ background: frame.css }}>
+      <div className={`ava ${size}`} style={{ background: user?.avatar ? "var(--side)" : color }}>
+        {user?.avatar ? <img src={user.avatar} alt="" /> : (user?.tag?.[0] || "?").toUpperCase()}
+        {size === "" && online && <div className="online-dot" />}
+      </div>
+    </div>
+  );
+}
+
+function Waveform({ bars, progress = 0 }) {
+  return (
+    <div className="wave">
+      {(bars || []).map((h, i) => <i key={i} style={{ height: `${h}px` }} className={i / bars.length < progress ? "played" : ""} />)}
+    </div>
+  );
+}
+
+function VoiceBubble({ msg }) {
+  const [playing, setPlaying] = useState(false);
+  const [prog, setProg] = useState(0);
+  const audioRef = useRef(null);
+  function toggle() {
+    if (!audioRef.current) {
+      audioRef.current = new Audio(msg.content);
+      audioRef.current.ontimeupdate = () => setProg(audioRef.current.currentTime / (audioRef.current.duration || 1));
+      audioRef.current.onended = () => { setPlaying(false); setProg(0); };
+    }
+    if (playing) { audioRef.current.pause(); setPlaying(false); }
+    else { audioRef.current.play().catch(() => {}); setPlaying(true); }
+  }
+  return (
+    <div className="b-voice">
+      <button className="send-btn" style={{ width: 36, height: 36, fontSize: 14 }} onClick={toggle}>
+        {playing ? "⏸" : "▶"}
+      </button>
+      <Waveform bars={msg.waveform || []} progress={prog} />
+      <span className="muted" style={{ fontSize: 12 }}>{msg.duration}с</span>
+    </div>
+  );
+}
+
+function highlight(text, q) {
+  if (!q) return text;
+  const i = text.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return text;
+  return <>{text.slice(0, i)}<mark>{text.slice(i, i + q.length)}</mark>{text.slice(i + q.length)}</>;
+}
+
+// ============ ПРИЛОЖЕНИЕ ============
+export default function App() {
+  const [phase, setPhase] = useState("loading"); // loading | auth | register | main
+  const [me, setMe] = useState(null);            // профиль текущего пользователя
+  const [profiles, setProfiles] = useState({});  // id -> профиль (кэш)
+  const [chats, setChats] = useState([]);        // мои диалоги
+  const [messages, setMessages] = useState({});  // chatId -> сообщения
+  const [reads, setReads] = useState({});        // chatId -> { userId: ts }
+  const [onlineIds, setOnlineIds] = useState(new Set());
+  const [typingMap, setTypingMap] = useState({}); // chatId -> ts последнего "печатает" собеседника
+  const [activeId, setActiveId] = useState(null);
+
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, ...loadPrefs() }));
+  const [draft, setDraft] = useState("");
+  const [replyTo, setReplyTo] = useState(null);
+  const [menu, setMenu] = useState(null);
+  const [showEmoji, setShowEmoji] = useState(false);
+  const [showAttach, setShowAttach] = useState(false);
+  const [emojiTab, setEmojiTab] = useState("😀");
+  const [showProfile, setShowProfile] = useState(false);
+  const [showPeer, setShowPeer] = useState(false);
+  const [userQuery, setUserQuery] = useState("");
+  const [searchResults, setSearchResults] = useState(null); // null = не искали
+  const [chatSearch, setChatSearch] = useState(null);
+  const [recording, setRecording] = useState(null);
+  const [, setRecTick] = useState(0);
+  const [viewer, setViewer] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const [login, setLogin] = useState(""); const [pass, setPass] = useState("");
+  const [pass2, setPass2] = useState(""); const [tag, setTag] = useState("");
+  const [showPw, setShowPw] = useState(false); const [err, setErr] = useState("");
+  const [regStep, setRegStep] = useState(1); const [busy, setBusy] = useState(false);
+
+  const msgsRef = useRef(null);
+  const taRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const lastTypingSend = useRef(0);
+  const chatChannelRef = useRef(null);
+  const activeIdRef = useRef(null);
+  activeIdRef.current = activeId;
+  const meRef = useRef(null);
+  meRef.current = me;
+
+  const avatarInp = useRef(null);
+  const mediaInp = useRef(null);
+  const fileInp = useRef(null);
+  const wpInp = useRef(null);
+
+  const activeChat = chats.find((c) => c.id === activeId);
+  const peerId = activeChat && (activeChat.u1 === me?.id ? activeChat.u2 : activeChat.u1);
+  const peer = peerId ? profiles[peerId] : null;
+  const activeMsgs = messages[activeId] || [];
+
+  function notify(text) {
+    setToast(text);
+    setTimeout(() => setToast(null), 2500);
+  }
+  function tickSound() {
+    if (!prefs.typeSound) return;
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtxRef.current;
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.frequency.value = 1500 + Math.random() * 600;
+      g.gain.setValueAtTime(0.04, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.05);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(); o.stop(ctx.currentTime + 0.06);
+    } catch {}
+  }
+  async function setPrefsAnd(patch) {
+    const next = { ...prefs, ...patch };
+    setPrefs(next);
+    storePrefs(next);
+  }
+
+  // ---------- ЗАГРУЗКА ДАННЫХ ----------
+  const cacheProfiles = useCallback((list) => {
+    setProfiles((p) => {
+      const next = { ...p };
+      list.forEach((u) => { if (u) next[u.id] = u; });
+      return next;
+    });
+  }, []);
+
+  const loadEverything = useCallback(async (myProfile) => {
+    const myId = myProfile.id;
+    const { data: chatList } = await supabase.from("chats").select("*")
+      .or(`u1.eq.${myId},u2.eq.${myId}`);
+    const cs = chatList || [];
+    setChats(cs);
+
+    const peerIds = [...new Set(cs.map((c) => (c.u1 === myId ? c.u2 : c.u1)))];
+    if (peerIds.length) {
+      const { data: peers } = await supabase.from("profiles").select("*").in("id", peerIds);
+      cacheProfiles(peers || []);
+    }
+    if (cs.length) {
+      const ids = cs.map((c) => c.id);
+      const { data: msgs } = await supabase.from("messages").select("*")
+        .in("chat_id", ids).order("created_at", { ascending: false }).limit(600);
+      const byChat = {};
+      (msgs || []).reverse().forEach((m) => { (byChat[m.chat_id] ||= []).push(m); });
+      setMessages(byChat);
+
+      const { data: rd } = await supabase.from("chat_reads").select("*").in("chat_id", ids);
+      const rmap = {};
+      (rd || []).forEach((r) => { (rmap[r.chat_id] ||= {})[r.user_id] = new Date(r.read_at).getTime(); });
+      setReads(rmap);
+    }
+  }, [cacheProfiles]);
+
+  // ---------- СТАРТ: сессия ----------
+  useEffect(() => {
+    if (!configured) { setPhase("config"); return; }
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) { setPhase("auth"); return; }
+      const { data: prof } = await supabase.from("profiles").select("*").eq("id", session.user.id).single();
+      if (!prof) { setPhase("register"); setRegStep(2); return; } // аккаунт есть, тег не выбран
+      setMe(prof);
+      cacheProfiles([prof]);
+      await loadEverything(prof);
+      setPhase("main");
+    })();
+  }, [loadEverything, cacheProfiles]);
+
+  // ---------- REALTIME: сообщения, чаты, прочитанность ----------
+  useEffect(() => {
+    if (phase !== "main" || !me) return;
+    const ch = supabase
+      .channel("db-stream")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (p) => {
+        const m = p.new;
+        setMessages((d) => {
+          const list = d[m.chat_id] || [];
+          if (list.some((x) => x.id === m.id)) return d;
+          return { ...d, [m.chat_id]: [...list, m] };
+        });
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, (p) => {
+        const m = p.new;
+        setMessages((d) => ({ ...d, [m.chat_id]: (d[m.chat_id] || []).map((x) => (x.id === m.id ? m : x)) }));
+      })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, (p) => {
+        const id = p.old.id;
+        setMessages((d) => {
+          const next = {};
+          for (const k of Object.keys(d)) next[k] = d[k].filter((x) => x.id !== id);
+          return next;
+        });
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "chats" }, async (p) => {
+        const c = p.new;
+        if (!c || (c.u1 !== me.id && c.u2 !== me.id)) return;
+        setChats((cs) => (cs.some((x) => x.id === c.id) ? cs.map((x) => (x.id === c.id ? c : x)) : [...cs, c]));
+        const pid = c.u1 === me.id ? c.u2 : c.u1;
+        if (!profiles[pid]) {
+          const { data: u } = await supabase.from("profiles").select("*").eq("id", pid).single();
+          if (u) cacheProfiles([u]);
+        }
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "chat_reads" }, (p) => {
+        const r = p.new;
+        if (!r) return;
+        setReads((d) => ({ ...d, [r.chat_id]: { ...(d[r.chat_id] || {}), [r.user_id]: new Date(r.read_at).getTime() } }));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, me?.id]);
+
+  // ---------- PRESENCE: кто онлайн ----------
+  useEffect(() => {
+    if (phase !== "main" || !me) return;
+    const ch = supabase.channel("online", { config: { presence: { key: me.id } } });
+    ch.on("presence", { event: "sync" }, () => {
+      setOnlineIds(new Set(Object.keys(ch.presenceState())));
+    }).subscribe(async (status) => {
+      if (status === "SUBSCRIBED") await ch.track({ at: Date.now() });
+    });
+    const beat = setInterval(() => {
+      supabase.from("profiles").update({ last_seen: new Date().toISOString() }).eq("id", me.id).then(() => {});
+    }, 120000);
+    return () => { clearInterval(beat); supabase.removeChannel(ch); };
+  }, [phase, me?.id]);
+
+  // ---------- КАНАЛ АКТИВНОГО ЧАТА: "печатает" ----------
+  useEffect(() => {
+    if (phase !== "main" || !activeId || !me) return;
+    const ch = supabase.channel(`chat-${activeId}`);
+    ch.on("broadcast", { event: "typing" }, (p) => {
+      if (p.payload?.user !== me.id) setTypingMap((t) => ({ ...t, [activeId]: Date.now() }));
+    }).subscribe();
+    chatChannelRef.current = ch;
+    return () => { chatChannelRef.current = null; supabase.removeChannel(ch); };
+  }, [phase, activeId, me?.id]);
+
+  function notifyTyping() {
+    if (!chatChannelRef.current || Date.now() - lastTypingSend.current < 2500) return;
+    lastTypingSend.current = Date.now();
+    chatChannelRef.current.send({ type: "broadcast", event: "typing", payload: { user: me.id } });
+  }
+  const peerTyping = (typingMap[activeId] || 0) > Date.now() - 5000;
+
+  // ---------- прочитанность ----------
+  useEffect(() => {
+    if (!activeId || !me) return;
+    const lastIncoming = [...activeMsgs].reverse().find((m) => m.sender_id !== me.id);
+    if (!lastIncoming) return;
+    const myRead = reads[activeId]?.[me.id] || 0;
+    if (myRead < new Date(lastIncoming.created_at).getTime()) {
+      supabase.from("chat_reads").upsert({ chat_id: activeId, user_id: me.id, read_at: new Date().toISOString() }).then(() => {});
+      setReads((d) => ({ ...d, [activeId]: { ...(d[activeId] || {}), [me.id]: Date.now() } }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, activeMsgs.length, me?.id]);
+
+  useEffect(() => {
+    if (msgsRef.current) msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
+  }, [activeMsgs.length, activeId]);
+
+  // ---------- АВТОРИЗАЦИЯ ----------
+  async function doLogin() {
+    setErr(""); setBusy(true);
+    const { data, error } = await supabase.auth.signInWithPassword({ email: loginToEmail(login), password: pass });
+    setBusy(false);
+    if (error) { setErr("Неверный логин или пароль."); return; }
+    const { data: prof } = await supabase.from("profiles").select("*").eq("id", data.user.id).single();
+    if (!prof) { setPhase("register"); setRegStep(2); return; }
+    setMe(prof); cacheProfiles([prof]);
+    await loadEverything(prof);
+    setPhase("main"); setPass("");
+  }
+  async function doRegisterStep1() {
+    setErr("");
+    if (!/^[a-zA-Z0-9_.-]{3,24}$/.test(login.trim())) { setErr("Логин: 3–24 символа, латиница, цифры, _ . -"); return; }
+    if (pass.length < 6) { setErr("Пароль — минимум 6 символов (требование Supabase)."); return; }
+    if (pass !== pass2) { setErr("Пароли не совпадают."); return; }
+    setBusy(true);
+    const { error } = await supabase.auth.signUp({ email: loginToEmail(login), password: pass });
+    setBusy(false);
+    if (error) {
+      setErr(error.message.includes("already registered") ? "Этот логин уже занят." : `Не удалось создать аккаунт: ${error.message}`);
+      return;
+    }
+    setRegStep(2);
+  }
+  async function doRegisterFinish() {
+    setErr("");
+    const t = tag.trim().replace(/^@/, "");
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(t)) { setErr("Тег: 3–20 символов, только латиница, цифры и _."); return; }
+    setBusy(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setBusy(false); setErr("Сессия потерялась, войдите заново."); setPhase("auth"); return; }
+    const profile = { id: user.id, login: login.trim() || user.email.split("@")[0], tag: t, bio: "", banner: 0, frame: "none" };
+    const { error } = await supabase.from("profiles").insert(profile);
+    setBusy(false);
+    if (error) {
+      setErr(error.code === "23505" ? "Этот тег уже занят, придумайте другой." : `Не удалось сохранить: ${error.message}`);
+      return;
+    }
+    const meNow = { ...profile, created_at: new Date().toISOString() };
+    setMe(meNow); cacheProfiles([meNow]);
+    await loadEverything(meNow);
+    setPhase("main"); setPass(""); setPass2("");
+  }
+  async function logout() {
+    await supabase.auth.signOut();
+    setMe(null); setActiveId(null); setShowProfile(false);
+    setChats([]); setMessages({}); setLogin(""); setPass("");
+    setPhase("auth");
+  }
+
+  // ---------- ПОИСК ПОЛЬЗОВАТЕЛЕЙ (по запросу, с задержкой) ----------
+  useEffect(() => {
+    if (phase !== "main") return;
+    const q = userQuery.trim().replace(/^@/, "");
+    if (!q) { setSearchResults(null); return; }
+    const t = setTimeout(async () => {
+      const { data } = await supabase.from("profiles").select("*")
+        .or(`tag.ilike.%${q}%,login.ilike.%${q}%`).neq("id", me.id).limit(15);
+      setSearchResults(data || []);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [userQuery, phase, me?.id]);
+
+  async function startChat(user) {
+    cacheProfiles([user]);
+    let chat = chats.find((c) => c.u1 === user.id || c.u2 === user.id);
+    if (!chat) {
+      const [a, b] = [me.id, user.id].sort();
+      const { data, error } = await supabase.from("chats").insert({ u1: a, u2: b }).select().single();
+      if (error) {
+        // возможно, чат уже создал собеседник
+        const { data: existing } = await supabase.from("chats").select("*")
+          .or(`and(u1.eq.${a},u2.eq.${b}),and(u1.eq.${b},u2.eq.${a})`).single();
+        if (!existing) { notify("Не удалось создать чат."); return; }
+        chat = existing;
+      } else chat = data;
+      setChats((cs) => (cs.some((x) => x.id === chat.id) ? cs : [...cs, chat]));
+    }
+    setUserQuery(""); setSearchResults(null);
+    openChat(chat.id);
+  }
+
+  function openChat(id) {
+    if (activeId) setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: draft } });
+    setActiveId(id);
+    setDraft(prefs.drafts?.[id] || "");
+    setReplyTo(null); setChatSearch(null); setShowEmoji(false); setShowAttach(false);
+  }
+
+  // ---------- СООБЩЕНИЯ ----------
+  const senderName = (m) => (m.sender_id === me?.id ? "Вы" : profiles[m.sender_id]?.login || "?");
+  const previewOf = (m) => m.type === "text" ? m.content.slice(0, 60) : { photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "";
+
+  async function sendMessage(payload) {
+    if (!activeId || !me) return;
+    const row = {
+      chat_id: activeId, sender_id: me.id, reactions: {},
+      reply_to: replyTo ? { id: replyTo.id, name: senderName(replyTo), text: previewOf(replyTo) } : null,
+      ...payload,
+    };
+    setReplyTo(null);
+    const { error } = await supabase.from("messages").insert(row);
+    if (error) notify(error.message.includes("payload") || error.message.includes("too large")
+      ? "Файл слишком большой." : "Не удалось отправить, проверьте интернет.");
+  }
+  function sendText(text) {
+    const t = (text ?? draft).trim();
+    if (!t) return;
+    sendMessage({ type: "text", content: t });
+    if (text == null) {
+      setDraft("");
+      if (taRef.current) taRef.current.style.height = "auto";
+      setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: "" } });
+    }
+  }
+  async function handleMedia(file) {
+    if (!file) return;
+    try {
+      if (file.type.startsWith("image/")) {
+        const data = await resizeImage(file, 1100, 0.78);
+        await sendMessage({ type: "photo", content: data, file_name: file.name });
+      } else if (file.type.startsWith("video/")) {
+        if (file.size > 8 * 1048576) { notify("Видео больше 8 МБ — пока не поддерживается."); return; }
+        await sendMessage({ type: "video", content: await fileToB64(file), file_name: file.name, file_size: file.size });
+      }
+    } catch { notify("Не удалось обработать файл."); }
+  }
+  async function handleFile(file) {
+    if (!file) return;
+    try {
+      if (file.type.startsWith("image/") || file.type.startsWith("video/")) { await handleMedia(file); return; }
+      if (file.size > 8 * 1048576) { notify("Файл больше 8 МБ — пока не поддерживается."); return; }
+      const data = await fileToB64(file);
+      await sendMessage({ type: "file", content: data, file_name: file.name, file_size: file.size });
+    } catch { notify("Не удалось обработать файл."); }
+  }
+  async function startVoice() {
+    setShowAttach(false);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream);
+      const chunks = [];
+      const startTs = Date.now();
+      rec.ondataavailable = (e) => chunks.push(e.data);
+      rec.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        if (!rec._send) return;
+        const blob = new Blob(chunks, { type: rec.mimeType });
+        if (blob.size > 5 * 1048576) { notify("Запись слишком длинная."); return; }
+        const data = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+        const dur = Math.max(1, Math.round((Date.now() - startTs) / 1000));
+        await sendMessage({ type: "voice", content: data, duration: dur, waveform: Array.from({ length: 28 }, () => 5 + Math.round(Math.random() * 16)) });
+      };
+      rec.start();
+      setRecording({ recorder: rec, start: startTs });
+    } catch {
+      notify("Браузер не дал доступ к микрофону. Разрешите его в настройках сайта.");
+    }
+  }
+  function stopVoice(send) {
+    if (!recording) return;
+    recording.recorder._send = send;
+    recording.recorder.stop();
+    setRecording(null);
+  }
+  useEffect(() => {
+    if (!recording) return;
+    const t = setInterval(() => setRecTick((x) => x + 1), 500);
+    return () => clearInterval(t);
+  }, [recording]);
+
+  async function toggleReaction(msg, emoji) {
+    const r = { ...(msg.reactions || {}) };
+    const list = r[emoji] || [];
+    r[emoji] = list.includes(me.id) ? list.filter((x) => x !== me.id) : [...list, me.id];
+    if (!r[emoji].length) delete r[emoji];
+    setMenu(null);
+    const { error } = await supabase.from("messages").update({ reactions: r }).eq("id", msg.id);
+    if (error) notify("Не удалось поставить реакцию.");
+  }
+  async function deleteMsg(msg) {
+    setMenu(null);
+    const { error } = await supabase.from("messages").delete().eq("id", msg.id);
+    if (error) notify("Не удалось удалить.");
+  }
+  async function pinMsg(msg) {
+    setMenu(null);
+    const next = activeChat?.pinned_msg === msg.id ? null : msg.id;
+    const { error } = await supabase.from("chats").update({ pinned_msg: next }).eq("id", activeId);
+    if (error) notify("Не удалось закрепить.");
+    else setChats((cs) => cs.map((c) => (c.id === activeId ? { ...c, pinned_msg: next } : c)));
+  }
+
+  // ---------- ПРОФИЛЬ ----------
+  async function saveProfile(patch) {
+    const { error } = await supabase.from("profiles").update(patch).eq("id", me.id);
+    if (error) { notify("Не удалось сохранить."); return; }
+    const next = { ...me, ...patch };
+    setMe(next); cacheProfiles([next]);
+    notify("Сохранено ✓");
+  }
+  function exportData() {
+    const blob = new Blob([JSON.stringify({ me: { ...me }, chats, messages }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "messenger-export.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  const unreadCount = (c) => {
+    const myRead = reads[c.id]?.[me.id] || 0;
+    return (messages[c.id] || []).filter((m) => m.sender_id !== me.id && new Date(m.created_at).getTime() > myRead).length;
+  };
+  const lastMsgOf = (c) => (messages[c.id] || []).slice(-1)[0];
+  const isOn = (u) => onlineIds.has(u?.id);
+  const lastSeenText = (u) => {
+    if (isOn(u)) return "онлайн";
+    if (!u?.last_seen) return "был(а) недавно";
+    const d = Date.now() - new Date(u.last_seen).getTime();
+    if (d < 3600000) return "был(а) недавно";
+    if (d < 86400000) return "был(а) сегодня";
+    return `был(а) ${new Date(u.last_seen).toLocaleDateString("ru-RU")}`;
+  };
+
+  const themeVars = {
+    "--accent": prefs.accent,
+    "--accent-dim": prefs.accent + "55",
+    "--accent-light": prefs.accent + "33",
+  };
+  const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
+  const sortedChats = useMemo(() => [...chats].sort((a, b) => {
+    const la = lastMsgOf(a) ? new Date(lastMsgOf(a).created_at).getTime() : new Date(a.created_at).getTime();
+    const lb = lastMsgOf(b) ? new Date(lastMsgOf(b).created_at).getTime() : new Date(b.created_at).getTime();
+    return lb - la;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [chats, messages]);
+
+  // ============ РЕНДЕР ============
+  if (phase === "config") {
+    return (
+      <div className="tg" data-theme="dark" style={{ ...themeVars, display: "block" }}>
+        <style>{css}</style>
+        <div className="auth-wrap"><div className="auth-box">
+          <h1>Почти готово</h1>
+          <p className="sub">Приложение не подключено к базе. Добавьте переменные VITE_SUPABASE_URL и VITE_SUPABASE_ANON_KEY в настройках Vercel (Settings → Environment Variables) и пересоберите проект. Подробности — в файле ИНСТРУКЦИЯ.md.</p>
+        </div></div>
+      </div>
+    );
+  }
+
+  if (phase === "loading") {
+    return (
+      <div className="tg" data-theme={prefs.theme} style={{ ...themeVars, display: "block" }}>
+        <style>{css}</style>
+        <div className="auth-wrap"><span className="muted">Загрузка…</span></div>
+      </div>
+    );
+  }
+
+  if (phase === "auth" || phase === "register") {
+    const isReg = phase === "register";
+    return (
+      <div className="tg" data-theme={prefs.theme} style={{ ...themeVars, display: "block" }}>
+        <style>{css}</style>
+        <div className="auth-wrap">
+          <div className="auth-box">
+            <h1>Мессенджер</h1>
+            <p className="sub">{isReg ? (regStep === 1 ? "Создание аккаунта" : "Выберите ваш @тег") : "Войдите, чтобы продолжить"}</p>
+            {!isReg && (<>
+              <input className="field" placeholder="Логин" value={login} onChange={(e) => setLogin(e.target.value)} />
+              <div className="pw-wrap">
+                <input className="field" type={showPw ? "text" : "password"} placeholder="Пароль" value={pass}
+                  onChange={(e) => setPass(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doLogin()} />
+                <button onClick={() => setShowPw(!showPw)}>{showPw ? "🙈" : "👁"}</button>
+              </div>
+              {err && <p className="err">{err}</p>}
+              <button className="btn" onClick={doLogin} disabled={!login || !pass || busy}>{busy ? "Входим…" : "Войти"}</button>
+              <button className="btn ghost" onClick={() => { setPhase("register"); setErr(""); setRegStep(1); }}>Нет аккаунта? Зарегистрироваться</button>
+            </>)}
+            {isReg && regStep === 1 && (<>
+              <input className="field" placeholder="Логин" value={login} onChange={(e) => setLogin(e.target.value)} />
+              <div className="pw-wrap">
+                <input className="field" type={showPw ? "text" : "password"} placeholder="Пароль (от 6 символов)" value={pass} onChange={(e) => setPass(e.target.value)} />
+                <button onClick={() => setShowPw(!showPw)}>{showPw ? "🙈" : "👁"}</button>
+              </div>
+              <input className="field" type={showPw ? "text" : "password"} placeholder="Подтверждение пароля" value={pass2} onChange={(e) => setPass2(e.target.value)} />
+              {err && <p className="err">{err}</p>}
+              <button className="btn" onClick={doRegisterStep1} disabled={busy}>{busy ? "Создаём…" : "Далее"}</button>
+              <button className="btn ghost" onClick={() => { setPhase("auth"); setErr(""); }}>Назад ко входу</button>
+            </>)}
+            {isReg && regStep === 2 && (<>
+              <input className="field" placeholder="@твой_тег" value={tag}
+                onChange={(e) => setTag(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doRegisterFinish()} autoFocus />
+              {err && <p className="err">{err}</p>}
+              <button className="btn" onClick={doRegisterFinish} disabled={busy}>{busy ? "Сохраняем…" : "Завершить регистрацию"}</button>
+            </>)}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const myBanner = BANNERS[me.banner] || BANNERS[0];
+
+  return (
+    <div className={`tg view-${activeId ? "chat" : "list"}`} data-theme={prefs.theme} style={themeVars}
+      onClick={() => { menu && setMenu(null); showAttach && setShowAttach(false); }}>
+      <style>{css}</style>
+
+      <input ref={avatarInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        try { await saveProfile({ avatar: await resizeImage(f, 128, 0.8) }); }
+        catch { notify("Не удалось обработать изображение."); }
+      }} />
+      <input ref={mediaInp} type="file" accept="image/*,video/*" hidden onChange={(e) => { handleMedia(e.target.files[0]); e.target.value = ""; }} />
+      <input ref={fileInp} type="file" hidden onChange={(e) => { handleFile(e.target.files[0]); e.target.value = ""; }} />
+      <input ref={wpInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        try {
+          const data = await resizeImage(f, 1280, 0.6);
+          await setPrefsAnd({ customWallpaper: data, wallpaper: "custom" });
+        } catch { notify("Не удалось обработать изображение."); }
+      }} />
+
+      {/* ЛЕВАЯ ПАНЕЛЬ */}
+      <div className="side">
+        <div className="side-top">
+          <button className="icon-btn" title="Профиль и настройки" onClick={() => setShowProfile(true)}>☰</button>
+          <input className="search-input" placeholder="Найти по @тегу…" value={userQuery}
+            onChange={(e) => setUserQuery(e.target.value)} />
+        </div>
+        <div className="chats">
+          {searchResults !== null ? (
+            searchResults.length ? searchResults.map((u) => (
+              <div className="chat-item" key={u.id} onClick={() => startChat(u)}>
+                <Avatar user={u} online={isOn(u)} />
+                <div className="ci-body">
+                  <div className="ci-row"><span className="ci-name">{u.login}</span></div>
+                  <div className="ci-last">@{u.tag}{u.bio ? ` · ${u.bio}` : ""}</div>
+                </div>
+                <span className="badge">Написать</span>
+              </div>
+            )) : <p className="muted" style={{ padding: 20, textAlign: "center", fontSize: 14 }}>Никого не нашлось. Проверьте @тег.</p>
+          ) : sortedChats.length ? (
+            sortedChats.map((c) => {
+              const pid = c.u1 === me.id ? c.u2 : c.u1;
+              const p = profiles[pid];
+              const last = lastMsgOf(c);
+              const n = unreadCount(c);
+              return (
+                <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id} onClick={() => openChat(c.id)}>
+                  <Avatar user={p} online={isOn(p)} />
+                  <div className="ci-body">
+                    <div className="ci-row">
+                      <span className="ci-name">{p?.login || "…"}</span>
+                      <span className="ci-time">{last ? fmtTime(last.created_at) : ""}</span>
+                    </div>
+                    <div className="ci-row">
+                      <span className="ci-last">{prefs.drafts?.[c.id] ? `✏️ ${prefs.drafts[c.id].slice(0, 40)}` : last ? `${last.sender_id === me.id ? "Вы: " : ""}${previewOf(last)}` : "Чат создан"}</span>
+                      {n > 0 && <span className="badge">{n}</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <p className="muted" style={{ padding: 24, textAlign: "center", fontSize: 14 }}>
+              Чатов пока нет.<br />Найдите собеседника по @тегу через поиск сверху.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* ПРАВАЯ ПАНЕЛЬ */}
+      <div className="main">
+        {!activeChat ? (
+          <div className="placeholder">Выберите чат</div>
+        ) : (<>
+          <div className="chat-head">
+            <button className="icon-btn back-btn" onClick={() => setActiveId(null)}>←</button>
+            <div onClick={() => setShowPeer(true)} style={{ cursor: "pointer" }}><Avatar user={peer} size="sm" /></div>
+            <div className="ch-info" onClick={() => setShowPeer(true)} title="Открыть профиль">
+              <div className="ch-name">{peer?.login} <span className="muted" style={{ fontWeight: 400, fontSize: 13 }}>@{peer?.tag}</span></div>
+              <div className={`ch-status${isOn(peer) || peerTyping ? " on" : ""}`}>
+                {peerTyping ? "печатает…" : lastSeenText(peer)}
+              </div>
+            </div>
+            <button className="icon-btn" title="Поиск по чату" onClick={() => setChatSearch(chatSearch === null ? "" : null)}>🔍</button>
+          </div>
+
+          {chatSearch !== null && (
+            <div style={{ padding: "6px 14px", background: "var(--side)", borderBottom: "1px solid var(--line)" }}>
+              <input className="search-input" style={{ width: "100%" }} placeholder="Поиск по сообщениям…" value={chatSearch}
+                onChange={(e) => setChatSearch(e.target.value)} autoFocus />
+            </div>
+          )}
+
+          {activeChat.pinned_msg && (() => {
+            const pm = activeMsgs.find((m) => m.id === activeChat.pinned_msg);
+            return pm ? (
+              <div className="pin-bar">📌 <span><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
+                <button className="icon-btn" style={{ fontSize: 13 }} onClick={() => pinMsg(pm)}>✕</button></div>
+            ) : null;
+          })()}
+
+          <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={{ background: wpCss || undefined }}>
+            {(chatSearch ? activeMsgs.filter((m) => m.type === "text" && m.content.toLowerCase().includes(chatSearch.toLowerCase())) : activeMsgs).map((m, i, arr) => {
+              const prev = arr[i - 1];
+              const ts = new Date(m.created_at).getTime();
+              const newDay = !prev || new Date(prev.created_at).toDateString() !== new Date(m.created_at).toDateString();
+              const out = m.sender_id === me.id;
+              const read = out && peer && (reads[activeId]?.[peer.id] || 0) >= ts;
+              const url = m.type === "text" ? findUrl(m.content) : null;
+              const showAsPhoto = m.type === "photo" || (m.type === "file" && isImg(m));
+              return (
+                <div key={m.id}>
+                  {newDay && <div style={{ display: "flex", justifyContent: "center" }}><span className="day-sep">{fmtDay(m.created_at)}</span></div>}
+                  <div className={`bubble-row ${out ? "out" : "in"}`}>
+                    <div className={`bubble ${out ? "out" : "in"}`}
+                      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setMenu({ x: Math.min(e.clientX, window.innerWidth - 190), y: Math.min(e.clientY, window.innerHeight - 290), msg: m }); }}>
+                      {m.reply_to && <div className="reply-quote"><b>{m.reply_to.name}</b>{m.reply_to.text}</div>}
+                      {m.type === "text" && <span>{highlight(m.content, chatSearch || "")}</span>}
+                      {showAsPhoto && <img className="b-img" src={m.content} alt="" onClick={() => setViewer(m.content)} />}
+                      {m.type === "video" && <video className="b-img" src={m.content} controls style={{ maxHeight: 280 }} />}
+                      {m.type === "file" && !showAsPhoto && (
+                        <a className="b-file" href={m.content} download={m.file_name} style={{ color: "var(--text)", textDecoration: "none" }}>
+                          <div className="fi">📄</div>
+                          <div><div style={{ fontWeight: 600, fontSize: 14 }}>{m.file_name}</div><div className="muted" style={{ fontSize: 12.5 }}>{fmtSize(m.file_size || 0)}</div></div>
+                        </a>
+                      )}
+                      {m.type === "voice" && <VoiceBubble msg={m} />}
+                      {url && <a className="link-card" href={url} target="_blank" rel="noreferrer">🔗 {(() => { try { return new URL(url).hostname; } catch { return url; } })()}</a>}
+                      {Object.keys(m.reactions || {}).length > 0 && (
+                        <div className="reacts">
+                          {Object.entries(m.reactions).map(([e, ids]) => (
+                            <button key={e} className={`react-chip${ids.includes(me.id) ? " mine" : ""}`} onClick={() => toggleReaction(m, e)}>
+                              {e} {ids.length}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="b-meta">
+                        {fmtTime(m.created_at)}
+                        {out && <span className={`ticks${read ? " read" : ""}`}>✓✓</span>}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {activeMsgs.length === 0 && <div className="placeholder" style={{ minHeight: 200 }}>Напишите первое сообщение</div>}
+          </div>
+
+          <div className="composer">
+            {replyTo && (
+              <div className="reply-bar">
+                <span style={{ color: "var(--accent)" }}>↩ {senderName(replyTo)}:</span>
+                <span className="muted" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{previewOf(replyTo)}</span>
+                <button className="icon-btn" style={{ fontSize: 13 }} onClick={() => setReplyTo(null)}>✕</button>
+              </div>
+            )}
+            {prefs.quickReplies?.length > 0 && !recording && (
+              <div className="quick-chips">
+                {prefs.quickReplies.map((q, i) => <button key={i} className="chip" title="Отправить сразу" onClick={() => sendText(q)}>⚡ {q}</button>)}
+              </div>
+            )}
+            <div className="compose-row" style={{ position: "relative" }}>
+              {showEmoji && (
+                <div className="emoji-pop">
+                  <div className="emoji-tabs">
+                    {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
+                  </div>
+                  <div className="emoji-grid">
+                    {EMOJI[emojiTab].map((e) => <button key={e} onClick={() => { setDraft((d) => d + e); taRef.current?.focus(); }}>{e}</button>)}
+                  </div>
+                </div>
+              )}
+              {showAttach && (
+                <div className="attach-pop" onClick={(e) => e.stopPropagation()}>
+                  <button onClick={() => { setShowAttach(false); mediaInp.current?.click(); }}>🖼 Фото или видео</button>
+                  <button onClick={() => { setShowAttach(false); fileInp.current?.click(); }}>📄 Документ</button>
+                  <button onClick={startVoice}>🎤 Голосовое сообщение</button>
+                </div>
+              )}
+              <button className="icon-btn" title="Прикрепить" onClick={(e) => { e.stopPropagation(); setShowAttach(!showAttach); setShowEmoji(false); }}>📎</button>
+              <button className="icon-btn" title="Эмодзи" onClick={() => { setShowEmoji(!showEmoji); setShowAttach(false); }}>😊</button>
+              {recording ? (
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "0 10px" }}>
+                  <span style={{ color: "#E26060" }}>● Запись… {Math.round((Date.now() - recording.start) / 1000)}с</span>
+                  <span style={{ flex: 1 }} />
+                  <button className="chip" onClick={() => stopVoice(false)}>Отмена</button>
+                </div>
+              ) : (
+                <textarea ref={taRef} rows={1} placeholder="Сообщение" value={draft}
+                  onChange={(e) => { setDraft(e.target.value); notifyTyping(); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
+                  onKeyDown={(e) => { tickSound(); if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); } }} />
+              )}
+              <button className="send-btn" title="Отправить" disabled={!draft.trim() && !recording}
+                onClick={() => recording ? stopVoice(true) : sendText()}>➤</button>
+            </div>
+          </div>
+        </>)}
+      </div>
+
+      {/* КОНТЕКСТНОЕ МЕНЮ */}
+      {menu && (
+        <div className="menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
+          <div className="rx">
+            {REACTIONS.map((e) => <button key={e} onClick={() => toggleReaction(menu.msg, e)}>{e}</button>)}
+          </div>
+          <button onClick={() => { setReplyTo(menu.msg); setMenu(null); taRef.current?.focus(); }}>↩ Ответить</button>
+          {menu.msg.type === "text" && <button onClick={() => { navigator.clipboard?.writeText(menu.msg.content); setMenu(null); }}>📋 Копировать</button>}
+          <button onClick={() => pinMsg(menu.msg)}>📌 {activeChat?.pinned_msg === menu.msg.id ? "Открепить" : "Закрепить"}</button>
+          {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
+        </div>
+      )}
+
+      {/* ПРОСМОТР ФОТО */}
+      {viewer && (
+        <div className="overlay" onClick={() => setViewer(null)}>
+          <img src={viewer} alt="" style={{ maxWidth: "95%", maxHeight: "95%", borderRadius: 8 }} />
+        </div>
+      )}
+
+      {/* ПРОФИЛЬ СОБЕСЕДНИКА */}
+      {showPeer && peer && (
+        <div className="overlay" onClick={() => setShowPeer(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="banner" style={{ background: BANNERS[peer.banner] || BANNERS[0] }}>
+              <Avatar user={peer} size="lg" />
+            </div>
+            <div className="modal-pad" style={{ paddingTop: 58 }}>
+              <div style={{ fontWeight: 700, fontSize: 19 }}>{peer.login}</div>
+              <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
+              {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
+              <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
+              <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowPeer(false)}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* СВОЙ ПРОФИЛЬ И НАСТРОЙКИ */}
+      {showProfile && (
+        <div className="overlay" onClick={() => setShowProfile(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="banner" style={{ background: myBanner }}>
+              <div onClick={() => avatarInp.current?.click()} title="Сменить аватар">
+                <Avatar user={me} size="lg" />
+              </div>
+            </div>
+            <div className="modal-pad" style={{ paddingTop: 58 }}>
+              <div style={{ fontWeight: 700, fontSize: 19 }}>{me.login}</div>
+              <div className="muted" style={{ fontSize: 14, marginBottom: 10 }}>@{me.tag} · нажмите на аватар, чтобы сменить</div>
+              <input className="field" placeholder="О себе (до 200 символов)" maxLength={200} defaultValue={me.bio}
+                onBlur={(e) => e.target.value !== me.bio && saveProfile({ bio: e.target.value })} />
+              <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
+
+              <h3>Баннер профиля</h3>
+              <div className="swatches">
+                {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i })} />)}
+              </div>
+
+              <h3>Рамка аватара</h3>
+              <div className="swatches">
+                {FRAMES.map((f) => (
+                  <div key={f.id} className={`sw${(me.frame || "none") === f.id ? " sel" : ""}`}
+                    style={{ background: f.id === "none" ? "var(--input)" : f.css }} title={f.name} onClick={() => saveProfile({ frame: f.id })} />
+                ))}
+              </div>
+
+              <h3>Тема</h3>
+              <div className="theme-row">
+                {[["light", "Светлая"], ["dark", "Тёмная"], ["amoled", "AMOLED"]].map(([v, l]) => (
+                  <button key={v} className={`btn${prefs.theme === v ? "" : " ghost"}`} style={{ padding: "8px 4px", fontSize: 13 }}
+                    onClick={() => setPrefsAnd({ theme: v })}>{l}</button>
+                ))}
+              </div>
+              <h3>Акцентный цвет</h3>
+              <div className="swatches">
+                {ACCENTS.map((c) => <div key={c} className={`sw${prefs.accent === c ? " sel" : ""}`} style={{ background: c }} onClick={() => setPrefsAnd({ accent: c })} />)}
+              </div>
+
+              <h3>Обои чата</h3>
+              <div className="wp-grid">
+                {WALLPAPERS.map((w, i) => (
+                  <div key={i} className={`wp${prefs.wallpaper === i ? " sel" : ""}`} style={{ background: w.css || "var(--input)" }}
+                    onClick={() => setPrefsAnd({ wallpaper: i })}>{w.name}</div>
+                ))}
+                <div className={`wp${prefs.wallpaper === "custom" ? " sel" : ""}`}
+                  style={{ backgroundImage: prefs.customWallpaper ? `url(${prefs.customWallpaper})` : undefined }}
+                  onClick={() => wpInp.current?.click()}>Своя 📁</div>
+              </div>
+
+              <div className="toggle-row" style={{ marginTop: 12 }}>
+                <span>🔊 Звук при печати</span>
+                <button className={`toggle${prefs.typeSound ? " on" : ""}`} onClick={() => setPrefsAnd({ typeSound: !prefs.typeSound })} />
+              </div>
+
+              <h3>Быстрые ответы (до 5, отправляются в один клик)</h3>
+              {Array.from({ length: 5 }).map((_, i) => (
+                <input key={i} className="field" style={{ marginBottom: 6, padding: "8px 12px" }} placeholder={`Фраза ${i + 1}`}
+                  defaultValue={prefs.quickReplies?.[i] || ""}
+                  onBlur={(e) => {
+                    const qr = [...(prefs.quickReplies || [])];
+                    qr[i] = e.target.value;
+                    setPrefsAnd({ quickReplies: qr.filter(Boolean).slice(0, 5) });
+                  }} />
+              ))}
+
+              <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                <button className="btn ghost" onClick={exportData}>⬇ Экспорт данных</button>
+                <button className="btn" style={{ background: "#D9534F" }} onClick={logout}>Выйти</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ТОСТ */}
+      {toast && (
+        <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "var(--side)", color: "var(--text)", border: "1px solid var(--line)", borderRadius: 10, padding: "10px 18px", fontSize: 14, zIndex: 100, boxShadow: "0 4px 20px rgba(0,0,0,0.3)" }}>
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
