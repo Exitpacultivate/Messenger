@@ -10,7 +10,7 @@ const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
 // ============ КОМПОНЕНТЫ ============
 function Avatar({ user, size = "", online = false }) {
   const color = ACCENTS[(user?.tag?.length || 0) % ACCENTS.length];
-  const frame = FRAMES.find((f) => f.id === user?.frame) || FRAMES[0];
+  const frame = user?.frame?.startsWith?.("#") ? { css: user.frame } : (FRAMES.find((f) => f.id === user?.frame) || FRAMES[0]);
   return (
     <div className="ava-frame" style={{ background: frame.css }}>
       <div className={`ava ${size}`} style={{ background: user?.avatar ? "var(--side)" : color }}>
@@ -21,7 +21,7 @@ function Avatar({ user, size = "", online = false }) {
   );
 }
 const GroupAvatar = ({ chat, size = "" }) => (
-  <Avatar user={{ tag: (chat.title || "Г"), frame: "none" }} size={size} />
+  <Avatar user={{ tag: (chat.title || "Г"), frame: "none", avatar: chat.avatar }} size={size} />
 );
 
 function Waveform({ bars, progress = 0 }) {
@@ -86,6 +86,9 @@ export default function App() {
   const [showProfile, setShowProfile] = useState(false);
   const [showChatInfo, setShowChatInfo] = useState(false);
   const [showGroupNew, setShowGroupNew] = useState(false);
+  const [groupEdit, setGroupEdit] = useState(false);
+  const [mediaTab, setMediaTab] = useState(null);
+  const [reactFor, setReactFor] = useState(null);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -111,6 +114,7 @@ export default function App() {
   const lastTypingSend = useRef(0);
   const chatChannelRef = useRef(null);
   const lpTimer = useRef(null);
+  const originalRef = useRef(false);
   const activeIdRef = useRef(null);
   activeIdRef.current = activeId;
 
@@ -118,13 +122,18 @@ export default function App() {
   const mediaInp = useRef(null);
   const fileInp = useRef(null);
   const wpInp = useRef(null);
+  const groupAvaInp = useRef(null);
 
   const activeChat = chats.find((c) => c.id === activeId);
   const isGroup = !!activeChat?.is_group;
   const peerId = activeChat && !isGroup && (activeChat.u1 === me?.id ? activeChat.u2 : activeChat.u1);
   const peer = peerId ? profiles[peerId] : null;
   const activeMsgs = messages[activeId] || [];
-  const activeMembers = (members[activeId] || []).map((id) => profiles[id]).filter(Boolean);
+  const memberRows = members[activeId] || [];
+  const activeMembers = memberRows.map((r) => profiles[r.user_id] && { ...profiles[r.user_id], _role: r.role, _rights: r.rights || {} }).filter(Boolean);
+  const myRow = memberRows.find((r) => r.user_id === me?.id);
+  const amOwner = isGroup && activeChat?.owner === me?.id;
+  const hasRight = (r) => amOwner || (myRow?.role === "admin" && !!myRow?.rights?.[r]);
 
   function notify(text) {
     setToast(text);
@@ -180,13 +189,13 @@ export default function App() {
     const membersMap = {};
     if (gids.length) {
       const { data: allMem } = await supabase.from("chat_members").select("*").in("chat_id", gids);
-      (allMem || []).forEach((m) => { (membersMap[m.chat_id] ||= []).push(m.user_id); });
+      (allMem || []).forEach((m) => { (membersMap[m.chat_id] ||= []).push({ user_id: m.user_id, role: m.role || "member", rights: m.rights || {} }); });
     }
     setMembers(membersMap);
 
     const pids = new Set();
     cs.forEach((c) => { if (!c.is_group) pids.add(c.u1 === myId ? c.u2 : c.u1); });
-    Object.values(membersMap).flat().forEach((id) => pids.add(id));
+    Object.values(membersMap).flat().forEach((m) => pids.add(m.user_id));
     pids.delete(myId); pids.delete(null); pids.delete(undefined);
     if (pids.size) {
       const { data: peers } = await supabase.from("profiles").select("*").in("id", [...pids]);
@@ -266,16 +275,21 @@ export default function App() {
           if (!chat) return;
           setChats((cs) => (cs.some((x) => x.id === chat.id) ? cs : [...cs, chat]));
           const { data: mm } = await supabase.from("chat_members").select("*").eq("chat_id", chat.id);
-          const ids = (mm || []).map((m) => m.user_id);
-          setMembers((d) => ({ ...d, [chat.id]: ids }));
-          ids.forEach(ensureProfile);
+          const rows = (mm || []).map((m) => ({ user_id: m.user_id, role: m.role || "member", rights: m.rights || {} }));
+          setMembers((d) => ({ ...d, [chat.id]: rows }));
+          rows.forEach((m) => ensureProfile(m.user_id));
           const { data: msgs } = await supabase.from("messages").select("*").eq("chat_id", chat.id)
             .order("created_at", { ascending: false }).limit(200);
           setMessages((d) => ({ ...d, [chat.id]: (msgs || []).reverse() }));
         } else {
-          setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: [...new Set([...d[r.chat_id], r.user_id])] } : d));
+          setMembers((d) => (d[r.chat_id] && !d[r.chat_id].some((m) => m.user_id === r.user_id)
+            ? { ...d, [r.chat_id]: [...d[r.chat_id], { user_id: r.user_id, role: r.role || "member", rights: r.rights || {} }] } : d));
           ensureProfile(r.user_id);
         }
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_members" }, (p) => {
+        const r = p.new;
+        setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: d[r.chat_id].map((m) => (m.user_id === r.user_id ? { ...m, role: r.role, rights: r.rights || {} } : m)) } : d));
       })
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_members" }, (p) => {
         const r = p.old;
@@ -283,7 +297,7 @@ export default function App() {
           setChats((cs) => cs.filter((c) => c.id !== r.chat_id));
           if (activeIdRef.current === r.chat_id) setActiveId(null);
         } else {
-          setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: d[r.chat_id].filter((x) => x !== r.user_id) } : d));
+          setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: d[r.chat_id].filter((m) => m.user_id !== r.user_id) } : d));
         }
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "chat_reads" }, (p) => {
@@ -352,6 +366,32 @@ export default function App() {
   useEffect(() => {
     if (msgsRef.current) msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
   }, [activeMsgs.length, activeId]);
+
+  // Esc — закрыть окно или выйти из чата; свайп в сторону — выйти из чата (мобильные)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      if (menu) setMenu(null);
+      else if (viewer) setViewer(null);
+      else if (reactFor) setReactFor(null);
+      else if (showProfile) setShowProfile(false);
+      else if (showChatInfo) { setShowChatInfo(false); setMediaTab(null); setGroupEdit(false); }
+      else if (showGroupNew) setShowGroupNew(false);
+      else if (chatSearch !== null) setChatSearch(null);
+      else setActiveId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch]);
+  const swipe = useRef(null);
+  function mainTouchStart(e) { const t = e.touches[0]; swipe.current = { x: t.clientX, y: t.clientY }; }
+  function mainTouchEnd(e) {
+    if (!swipe.current) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - swipe.current.x, dy = t.clientY - swipe.current.y;
+    swipe.current = null;
+    if (Math.abs(dx) > 70 && Math.abs(dy) < 50 && window.innerWidth <= 720) setActiveId(null);
+  }
 
   // ---------- АВТОРИЗАЦИЯ ----------
   async function doLogin() {
@@ -422,7 +462,7 @@ export default function App() {
   }
   useUserSearch(userQuery, setSearchResults);
   useUserSearch(groupQuery, setGroupResults, (u) => !groupPicks.some((p) => p.id === u.id));
-  useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).includes(u.id));
+  useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).some((m) => m.user_id === u.id));
 
   async function startChat(user) {
     cacheProfiles([user]);
@@ -448,22 +488,22 @@ export default function App() {
     if (!title) { notify("Дайте группе название."); return; }
     if (!groupPicks.length) { notify("Добавьте хотя бы одного участника."); return; }
     const { data: chat, error } = await supabase.from("chats")
-      .insert({ is_group: true, title, u1: me.id, owner: me.id }).select().single();
-    if (error) { notify("Не удалось создать группу."); return; }
+      .insert({ is_group: true, title, u1: me.id, u2: null, owner: me.id }).select().single();
+    if (error) { console.error(error); notify(`Не удалось создать группу: ${error.message}`); return; }
     const ids = [me.id, ...groupPicks.map((p) => p.id)];
     const { error: e2 } = await supabase.from("chat_members").insert(ids.map((uid) => ({ chat_id: chat.id, user_id: uid })));
     if (e2) { notify("Группа создана, но участники не добавились. Добавьте их в настройках группы."); }
     cacheProfiles(groupPicks);
-    setMembers((m) => ({ ...m, [chat.id]: ids }));
+    setMembers((m) => ({ ...m, [chat.id]: ids.map((uid) => ({ user_id: uid, role: "member", rights: {} })) }));
     setChats((cs) => (cs.some((x) => x.id === chat.id) ? cs : [...cs, chat]));
     setShowGroupNew(false); setGroupTitle(""); setGroupPicks([]); setGroupQuery("");
     openChat(chat.id);
   }
   async function addMember(user) {
     const { error } = await supabase.from("chat_members").insert({ chat_id: activeId, user_id: user.id });
-    if (error) { notify("Не удалось добавить."); return; }
+    if (error) { console.error(error); notify(`Не удалось добавить: ${error.message}`); return; }
     cacheProfiles([user]);
-    setMembers((m) => ({ ...m, [activeId]: [...new Set([...(m[activeId] || []), user.id])] }));
+    setMembers((m) => ({ ...m, [activeId]: [...(m[activeId] || []).filter((x) => x.user_id !== user.id), { user_id: user.id, role: "member", rights: {} }] }));
     setAddQuery(""); setAddResults(null);
     notify(`${user.login} добавлен(а) ✓`);
   }
@@ -477,7 +517,19 @@ export default function App() {
   async function kickMember(uid) {
     const { error } = await supabase.from("chat_members").delete().eq("chat_id", activeId).eq("user_id", uid);
     if (error) { notify("Не удалось удалить участника."); return; }
-    setMembers((m) => ({ ...m, [activeId]: (m[activeId] || []).filter((x) => x !== uid) }));
+    setMembers((m) => ({ ...m, [activeId]: (m[activeId] || []).filter((x) => x.user_id !== uid) }));
+  }
+
+  async function setMemberRole(uid, role, rights) {
+    const { error } = await supabase.from("chat_members").update({ role, rights }).eq("chat_id", activeId).eq("user_id", uid);
+    if (error) { notify(`Не удалось изменить права: ${error.message}`); return; }
+    setMembers((m) => ({ ...m, [activeId]: (m[activeId] || []).map((x) => (x.user_id === uid ? { ...x, role, rights } : x)) }));
+  }
+  async function saveGroup(patch) {
+    const { error } = await supabase.from("chats").update(patch).eq("id", activeId);
+    if (error) { notify(`Не удалось сохранить: ${error.message}`); return; }
+    setChats((cs) => cs.map((c) => (c.id === activeId ? { ...c, ...patch } : c)));
+    notify("Сохранено ✓");
   }
 
   function openChat(id) {
@@ -528,8 +580,10 @@ export default function App() {
     try {
       if (file.type.startsWith("image/")) {
         notify("Загружаем фото…");
-        const blob = await resizeToBlob(file, 1100, 0.78);
-        const url = await uploadMedia(blob, "jpg", "image/jpeg");
+        const orig = originalRef.current; originalRef.current = false;
+        const url = orig
+          ? await uploadMedia(file, extOf(file.name, "png"), file.type || "image/png")
+          : await uploadMedia(await resizeToBlob(file, 1100, 0.78), "jpg", "image/jpeg");
         await sendMessage({ type: "photo", content: url, file_name: file.name });
       } else if (file.type.startsWith("video/")) {
         if (file.size > 25 * 1048576) { notify("Видео больше 25 МБ — не поместится."); return; }
@@ -562,8 +616,11 @@ export default function App() {
   async function startVoice() {
     setShowAttach(false);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const rec = new MediaRecorder(stream);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      const mime = window.MediaRecorder?.isTypeSupported?.("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : undefined;
+      const rec = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 128000 });
       const chunks = [];
       const startTs = Date.now();
       rec.ondataavailable = (e) => chunks.push(e.data);
@@ -651,6 +708,20 @@ export default function App() {
     return (messages[c.id] || []).filter((m) => m.sender_id !== me.id && new Date(m.created_at).getTime() > myRead).length;
   };
   const lastMsgOf = (c) => (messages[c.id] || []).slice(-1)[0];
+  const isMuted = (id) => (prefs.muted || []).includes(id);
+  const toggleMute = (id) => setPrefsAnd({ muted: isMuted(id) ? (prefs.muted || []).filter((x) => x !== id) : [...(prefs.muted || []), id] });
+  const AUDIO_RE = /\.(mp3|m4a|wav|ogg|flac)$/i;
+  const mediaOf = (type) => {
+    const list = messages[activeId] || [];
+    if (type === "photo") return list.filter((m) => m.type === "photo" && !/\.gif$/i.test(m.file_name || ""));
+    if (type === "video") return list.filter((m) => m.type === "video");
+    if (type === "voice") return list.filter((m) => m.type === "voice");
+    if (type === "audio") return list.filter((m) => m.type === "file" && AUDIO_RE.test(m.file_name || ""));
+    if (type === "file") return list.filter((m) => m.type === "file" && !AUDIO_RE.test(m.file_name || ""));
+    if (type === "link") return list.filter((m) => m.type === "text" && findUrl(m.content));
+    if (type === "gif") return list.filter((m) => m.type === "photo" && /\.gif$/i.test(m.file_name || ""));
+    return [];
+  };
   const isOn = (u) => onlineIds.has(u?.id);
   const lastSeenText = (u) => {
     if (isOn(u)) return "онлайн";
@@ -738,7 +809,7 @@ export default function App() {
     );
   }
 
-  const myBanner = BANNERS[me.banner] || BANNERS[0];
+  const myBanner = me.banner_color || BANNERS[me.banner] || BANNERS[0];
 
   return (
     <div className={`tg view-${activeId ? "chat" : "list"}`} data-theme={prefs.theme} style={themeVars}
@@ -759,6 +830,15 @@ export default function App() {
         try {
           const data = await resizeImage(f, 1280, 0.6);
           await setPrefsAnd({ customWallpaper: data, wallpaper: "custom" });
+        } catch { notify("Не удалось обработать изображение."); }
+      }} />
+
+      <input ref={groupAvaInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        try {
+          const url = await uploadMedia(await resizeToBlob(f, 256, 0.85), "jpg", "image/jpeg");
+          await saveGroup({ avatar: url });
         } catch { notify("Не удалось обработать изображение."); }
       }} />
 
@@ -795,12 +875,12 @@ export default function App() {
                   {c.is_group ? <GroupAvatar chat={c} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
-                      <span className="ci-name">{c.is_group && "👥 "}{chatTitle(c)}</span>
+                      <span className="ci-name">{c.is_group && "👥 "}{chatTitle(c)}{isMuted(c.id) && " 🔕"}</span>
                       <span className="ci-time">{last ? fmtTime(last.created_at) : ""}</span>
                     </div>
                     <div className="ci-row">
                       <span className="ci-last">{prefs.drafts?.[c.id] ? `✏️ ${prefs.drafts[c.id].slice(0, 40)}` : lastLabel}</span>
-                      {n > 0 && <span className="badge">{n}</span>}
+                      {n > 0 && !isMuted(c.id) && <span className="badge">{n}</span>}
                     </div>
                   </div>
                 </div>
@@ -815,7 +895,7 @@ export default function App() {
       </div>
 
       {/* ПРАВАЯ ПАНЕЛЬ */}
-      <div className="main">
+      <div className="main" onTouchStart={mainTouchStart} onTouchEnd={mainTouchEnd}>
         {!activeChat ? (
           <div className="placeholder">Выберите чат</div>
         ) : (<>
@@ -937,6 +1017,7 @@ export default function App() {
                 <div className="attach-pop" onClick={(e) => e.stopPropagation()}>
                   <button onClick={() => { setShowAttach(false); mediaInp.current?.click(); }}>🖼 Фото или видео</button>
                   <button onClick={() => { setShowAttach(false); fileInp.current?.click(); }}>📄 Документ</button>
+                  <button onClick={() => { setShowAttach(false); originalRef.current = true; fileInp.current?.click(); }}>🗂 Оригинал (без сжатия)</button>
                   <button onClick={startVoice}>🎤 Голосовое сообщение</button>
                 </div>
               )}
@@ -965,11 +1046,29 @@ export default function App() {
         <div className="menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
           <div className="rx">
             {REACTIONS.map((e) => <button key={e} onClick={() => toggleReaction(menu.msg, e)}>{e}</button>)}
+            <button title="Другая реакция" onClick={() => { const m = menu.msg; setMenu(null); setReactFor(m); }}>＋</button>
           </div>
           <button onClick={() => { setReplyTo(menu.msg); setMenu(null); taRef.current?.focus(); }}>↩ Ответить</button>
           {menu.msg.type === "text" && <button onClick={() => { navigator.clipboard?.writeText(menu.msg.content); setMenu(null); }}>📋 Копировать</button>}
           <button onClick={() => pinMsg(menu.msg)}>📌 {activeChat?.pinned_msg === menu.msg.id ? "Открепить" : "Закрепить"}</button>
           {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
+        </div>
+      )}
+
+      {/* ВЫБОР ЛЮБОЙ РЕАКЦИИ */}
+      {reactFor && (
+        <div className="overlay" onClick={() => setReactFor(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>Выберите реакцию</h3>
+              <div className="emoji-tabs">
+                {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
+              </div>
+              <div className="emoji-grid">
+                {EMOJI[emojiTab].map((e) => <button key={e} onClick={() => { toggleReaction(reactFor, e); setReactFor(null); }}>{e}</button>)}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1017,45 +1116,135 @@ export default function App() {
 
       {/* ИНФО О ЧАТЕ / ПРОФИЛЬ СОБЕСЕДНИКА */}
       {showChatInfo && activeChat && (
-        <div className="overlay" onClick={() => { setShowChatInfo(false); setAddQuery(""); }}>
+        <div className="overlay" onClick={() => { setShowChatInfo(false); setAddQuery(""); setMediaTab(null); setGroupEdit(false); }}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             {isGroup ? (
-              <div className="modal-pad">
-                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
+              mediaTab ? (
+                <div className="modal-pad">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <button className="icon-btn" onClick={() => setMediaTab(null)}>←</button>
+                    <h3 style={{ margin: 0 }}>{{ photo: "Фото", video: "Видео", file: "Файлы", audio: "Аудио", voice: "Голосовые", link: "Ссылки", gif: "GIF" }[mediaTab]}</h3>
+                  </div>
+                  {(mediaTab === "photo" || mediaTab === "gif") ? (
+                    <div className="media-grid">
+                      {mediaOf(mediaTab).map((m) => <img key={m.id} src={m.content} alt="" onClick={() => setViewer(m.content)} />)}
+                    </div>
+                  ) : mediaOf(mediaTab).map((m) => (
+                    <div className="member-row" key={m.id}>
+                      {mediaTab === "video" ? <video src={m.content} controls style={{ maxWidth: 170, borderRadius: 8 }} />
+                        : mediaTab === "voice" ? <VoiceBubble msg={m} />
+                        : mediaTab === "link" ? <a className="link-card" style={{ flex: 1, wordBreak: "break-all" }} href={findUrl(m.content)} target="_blank" rel="noreferrer">{findUrl(m.content)}</a>
+                        : <a className="b-file" href={m.content} download={m.file_name} style={{ color: "var(--text)", textDecoration: "none", flex: 1 }}>
+                            <div className="fi">{mediaTab === "audio" ? "🎧" : "📄"}</div>
+                            <div><div style={{ fontWeight: 600, fontSize: 14 }}>{m.file_name}</div><div className="muted" style={{ fontSize: 12.5 }}>{fmtSize(m.file_size || 0)}</div></div>
+                          </a>}
+                      <span className="muted" style={{ fontSize: 12, marginLeft: "auto" }}>{fmtTime(m.created_at)}</span>
+                    </div>
+                  ))}
+                  {mediaOf(mediaTab).length === 0 && <p className="muted" style={{ textAlign: "center", padding: 16 }}>Пока пусто</p>}
+                </div>
+              ) : groupEdit ? (
+                <div className="modal-pad">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <button className="icon-btn" onClick={() => setGroupEdit(false)}>←</button>
+                    <h3 style={{ margin: 0 }}>Управление группой</h3>
+                  </div>
+                  {hasRight("edit") && (<>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10 }}>
+                      <div onClick={() => groupAvaInp.current?.click()} title="Сменить аватар группы" style={{ cursor: "pointer" }}>
+                        <GroupAvatar chat={activeChat} size="lg" />
+                      </div>
+                      <span className="muted" style={{ fontSize: 13 }}>Нажмите на аватар,<br />чтобы сменить</span>
+                    </div>
+                    <input className="field" placeholder="Название группы" maxLength={50} defaultValue={activeChat.title}
+                      onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== activeChat.title && saveGroup({ title: e.target.value.trim() })} />
+                    <input className="field" placeholder="Описание группы" maxLength={200} defaultValue={activeChat.description || ""}
+                      onBlur={(e) => e.target.value !== (activeChat.description || "") && saveGroup({ description: e.target.value })} />
+                    <h3>Баннер группы</h3>
+                    <div className="swatches">
+                      {BANNERS.map((b, i) => <div key={i} className={`sw${activeChat.banner === i ? " sel" : ""}`} style={{ background: b }} onClick={() => saveGroup({ banner: i })} />)}
+                    </div>
+                  </>)}
+                  <h3>Участники и права</h3>
+                  {activeMembers.map((u) => (
+                    <div key={u.id}>
+                      <div className="member-row">
+                        <Avatar user={u} size="sm" online={isOn(u)} />
+                        <span className="mr-name">{u.login} {u.id === activeChat.owner ? "👑" : u._role === "admin" ? "⭐" : ""}</span>
+                        {u.id !== activeChat.owner && u.id !== me.id && (<>
+                          {hasRight("admins") && (
+                            <button className="chip" onClick={() => setMemberRole(u.id, u._role === "admin" ? "member" : "admin", u._role === "admin" ? {} : { kick: true })}>
+                              {u._role === "admin" ? "Снять админа" : "Сделать админом"}
+                            </button>
+                          )}
+                          {hasRight("kick") && <button className="icon-btn" title="Исключить из группы" style={{ fontSize: 14 }} onClick={() => kickMember(u.id)}>✕</button>}
+                        </>)}
+                      </div>
+                      {amOwner && u._role === "admin" && u.id !== activeChat.owner && (
+                        <div className="rights-row">
+                          {[["kick", "исключение участников"], ["admins", "назначение админов"], ["edit", "редактирование профиля"]].map(([k, label]) => (
+                            <label key={k} style={{ cursor: "pointer" }}>
+                              <input type="checkbox" checked={!!u._rights?.[k]}
+                                onChange={(e) => setMemberRole(u.id, "admin", { ...u._rights, [k]: e.target.checked })} /> {label}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <h3>Добавить участника</h3>
+                  <input className="field" placeholder="Поиск по @тегу…" value={addQuery} onChange={(e) => setAddQuery(e.target.value)} />
+                  {(addResults || []).map((u) => (
+                    <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => addMember(u)}>
+                      <Avatar user={u} size="sm" online={isOn(u)} />
+                      <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
+                      <span className="badge">＋</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (<>
+                <div className="banner" style={{ background: BANNERS[activeChat.banner] || BANNERS[7] }}>
                   <GroupAvatar chat={activeChat} size="lg" />
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 19 }}>{activeChat.title}</div>
-                    <div className="muted" style={{ fontSize: 14 }}>{activeMembers.length} участников</div>
-                  </div>
                 </div>
-                <h3>Участники</h3>
-                {activeMembers.map((u) => (
-                  <div className="member-row" key={u.id}>
-                    <Avatar user={u} size="sm" online={isOn(u)} />
-                    <span className="mr-name">
-                      {u.login} {u.id === activeChat.owner && "👑"} {u.id === me.id && <span className="muted">(вы)</span>}
-                    </span>
-                    {activeChat.owner === me.id && u.id !== me.id && (
-                      <button className="icon-btn" title="Удалить из группы" style={{ fontSize: 14 }} onClick={() => kickMember(u.id)}>✕</button>
+                <div className="modal-pad" style={{ paddingTop: 58 }}>
+                  <div style={{ fontWeight: 700, fontSize: 19 }}>{activeChat.title}</div>
+                  <div className="muted" style={{ fontSize: 14 }}>
+                    {activeMembers.length} участников{activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}
+                  </div>
+                  {activeChat.description && <p style={{ marginTop: 8, fontSize: 14.5, lineHeight: 1.4 }}>{activeChat.description}</p>}
+
+                  <div className="ios-actions">
+                    <button className="ios-btn" onClick={() => toggleMute(activeId)}>
+                      <span className="ic">{isMuted(activeId) ? "🔕" : "🔔"}</span>{isMuted(activeId) ? "Вкл. звук" : "Без звука"}
+                    </button>
+                    {(amOwner || myRow?.role === "admin") && (
+                      <button className="ios-btn" onClick={() => setGroupEdit(true)}><span className="ic">⚙️</span>Управление</button>
                     )}
+                    <button className="ios-btn" onClick={() => { setShowChatInfo(false); setChatSearch(""); }}><span className="ic">🔍</span>Поиск</button>
+                    <button className="ios-btn" onClick={leaveGroup}><span className="ic">🚪</span>Выйти</button>
                   </div>
-                ))}
-                <h3>Добавить участника</h3>
-                <input className="field" placeholder="Поиск по @тегу…" value={addQuery} onChange={(e) => setAddQuery(e.target.value)} />
-                {(addResults || []).map((u) => (
-                  <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => addMember(u)}>
-                    <Avatar user={u} size="sm" online={isOn(u)} />
-                    <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
-                    <span className="badge">＋</span>
+
+                  <div className="ios-list">
+                    {[["photo", "🖼", "фото"], ["video", "🎬", "видео"], ["file", "📄", "файлов"], ["audio", "🎧", "аудио"], ["link", "🔗", "ссылок"], ["voice", "🎤", "голосовых"], ["gif", "🪄", "GIF"]].map(([k, ic, label]) => (
+                      <button className="ios-row" key={k} onClick={() => setMediaTab(k)}>
+                        <span>{ic}</span> {mediaOf(k).length} {label}
+                        <span className="cnt">›</span>
+                      </button>
+                    ))}
                   </div>
-                ))}
-                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                  <button className="btn" style={{ background: "#D9534F" }} onClick={leaveGroup}>Покинуть группу</button>
-                  <button className="btn ghost" onClick={() => setShowChatInfo(false)}>Закрыть</button>
+
+                  <h3>Участники</h3>
+                  {activeMembers.map((u) => (
+                    <div className="member-row" key={u.id}>
+                      <Avatar user={u} size="sm" online={isOn(u)} />
+                      <span className="mr-name">{u.login} {u.id === activeChat.owner ? "👑" : u._role === "admin" ? "⭐" : ""} {u.id === me.id && <span className="muted">(вы)</span>}</span>
+                    </div>
+                  ))}
+                  <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowChatInfo(false)}>Закрыть</button>
                 </div>
-              </div>
+              </>)
             ) : peer ? (<>
-              <div className="banner" style={{ background: BANNERS[peer.banner] || BANNERS[0] }}>
+              <div className="banner" style={{ background: peer.banner_color || BANNERS[peer.banner] || BANNERS[0] }}>
                 <Avatar user={peer} size="lg" />
               </div>
               <div className="modal-pad" style={{ paddingTop: 58 }}>
@@ -1088,7 +1277,8 @@ export default function App() {
 
               <h3>Баннер профиля</h3>
               <div className="swatches">
-                {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i })} />)}
+                {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i && !me.banner_color ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i, banner_color: null })} />)}
+                <label className="sw rainbow" title="Свой цвет баннера"><input type="color" value={me.banner_color || "#5AABF0"} onChange={(e) => saveProfile({ banner_color: e.target.value })} /></label>
               </div>
 
               <h3>Рамка аватара</h3>
@@ -1097,6 +1287,7 @@ export default function App() {
                   <div key={f.id} className={`sw${(me.frame || "none") === f.id ? " sel" : ""}`}
                     style={{ background: f.id === "none" ? "var(--input)" : f.css }} title={f.name} onClick={() => saveProfile({ frame: f.id })} />
                 ))}
+                <label className="sw rainbow" title="Свой цвет рамки"><input type="color" value={me.frame?.startsWith?.("#") ? me.frame : "#5AABF0"} onChange={(e) => saveProfile({ frame: e.target.value })} /></label>
               </div>
 
               <h3>Тема</h3>
@@ -1109,6 +1300,7 @@ export default function App() {
               <h3>Акцентный цвет</h3>
               <div className="swatches">
                 {ACCENTS.map((c) => <div key={c} className={`sw${prefs.accent === c ? " sel" : ""}`} style={{ background: c }} onClick={() => setPrefsAnd({ accent: c })} />)}
+                <label className="sw rainbow" title="Свой цвет"><input type="color" value={prefs.accent} onChange={(e) => setPrefsAnd({ accent: e.target.value })} /></label>
               </div>
 
               <h3>Обои чата</h3>
