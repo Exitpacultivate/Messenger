@@ -5,6 +5,20 @@ import { ACCENTS, WALLPAPERS, BANNERS, FRAMES, EMOJI, REACTIONS } from "./consta
 import { fmtTime, fmtDay, fmtSize, findUrl, isImg, resizeImage, resizeToBlob, fileToB64, loadPrefs, storePrefs } from "./helpers.js";
 
 const EMAIL_DOMAIN = "msgr.example.com";
+const FONTS = [
+  { id: "system", name: "Системный", css: "-apple-system, 'Segoe UI', Roboto, sans-serif" },
+  { id: "inter", name: "Inter", css: "'Inter', sans-serif" },
+  { id: "rubik", name: "Rubik", css: "'Rubik', sans-serif" },
+  { id: "comfortaa", name: "Comfortaa", css: "'Comfortaa', sans-serif" },
+  { id: "mono", name: "Mono", css: "'JetBrains Mono', monospace" },
+];
+const APP_ICONS = [
+  { id: "blue", name: "Классика", file: "/favicon.svg" },
+  { id: "violet", name: "Неон", file: "/icon-violet.svg" },
+  { id: "mint", name: "Мята", file: "/icon-mint.svg" },
+  { id: "dark", name: "Минимал", file: "/icon-dark.svg" },
+];
+const blobToB64 = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
 const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
 
 // ============ КОМПОНЕНТЫ ============
@@ -56,18 +70,19 @@ function VoiceBubble({ msg }) {
   );
 }
 
-function CropModal({ src, onCancel, onSave }) {
+function CropModal({ src, aspect = 1, round = true, onCancel, onSave }) {
   const [zoom, setZoom] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [nat, setNat] = useState(null);
   const drag = useRef(null);
   const imgEl = useRef(null);
-  const BOX = 240;
-  const base = nat ? Math.max(BOX / nat.w, BOX / nat.h) : 1;
-  const w = nat ? nat.w * base * zoom : BOX;
-  const h = nat ? nat.h * base * zoom : BOX;
-  const clamp = (p) => ({ x: Math.min(0, Math.max(BOX - w, p.x)), y: Math.min(0, Math.max(BOX - h, p.y)) });
-  useEffect(() => { setPos((p) => ({ x: Math.min(0, Math.max(BOX - w, p.x)), y: Math.min(0, Math.max(BOX - h, p.y)) })); }, [w, h]);
+  let bw = 260, bh = Math.round(260 / aspect);
+  if (bh > 300) { bh = 300; bw = Math.round(300 * aspect); }
+  const base = nat ? Math.max(bw / nat.w, bh / nat.h) : 1;
+  const w = nat ? nat.w * base * zoom : bw;
+  const h = nat ? nat.h * base * zoom : bh;
+  const clamp = (p) => ({ x: Math.min(0, Math.max(bw - w, p.x)), y: Math.min(0, Math.max(bh - h, p.y)) });
+  useEffect(() => { setPos((p) => ({ x: Math.min(0, Math.max(bw - w, p.x)), y: Math.min(0, Math.max(bh - h, p.y)) })); }, [w, h, bw, bh]);
   function down(e) {
     const t = e.touches ? e.touches[0] : e;
     drag.current = { sx: t.clientX, sy: t.clientY, px: pos.x, py: pos.y };
@@ -79,23 +94,25 @@ function CropModal({ src, onCancel, onSave }) {
   }
   function up() { drag.current = null; }
   function save() {
+    const outW = aspect >= 1 ? 1024 : Math.round(1024 * aspect);
+    const outH = Math.round(outW / aspect);
     const c = document.createElement("canvas");
-    c.width = 512; c.height = 512;
-    const k = 512 / BOX;
+    c.width = outW; c.height = outH;
+    const k = outW / bw;
     c.getContext("2d").drawImage(imgEl.current, pos.x * k, pos.y * k, w * k, h * k);
-    c.toBlob((b) => b && onSave(b), "image/jpeg", 0.85);
+    c.toBlob((b) => b && onSave(b), "image/jpeg", 0.82);
   }
   return (
     <div className="overlay" style={{ zIndex: 80 }} onClick={onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-pad">
           <h3 style={{ marginTop: 0 }}>Положение фото</h3>
-          <div className="crop-box" onMouseDown={down} onMouseMove={move} onMouseUp={up} onMouseLeave={up}
+          <div className="crop-box" style={{ width: bw, height: bh }} onMouseDown={down} onMouseMove={move} onMouseUp={up} onMouseLeave={up}
             onTouchStart={down} onTouchMove={move} onTouchEnd={up}>
             <img ref={imgEl} src={src} alt="" draggable={false}
               onLoad={(e) => setNat({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
               style={{ position: "absolute", left: pos.x, top: pos.y, width: w, height: h, maxWidth: "none", userSelect: "none", pointerEvents: "none" }} />
-            <div className="crop-ring" />
+            {round && <div className="crop-ring" />}
           </div>
           <input type="range" min={1} max={3} step={0.01} value={zoom} onChange={(e) => setZoom(+e.target.value)} style={{ width: "100%", margin: "12px 0" }} />
           <button className="btn" onClick={save}>Сохранить</button>
@@ -126,7 +143,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -153,6 +170,15 @@ export default function App() {
   const [annText, setAnnText] = useState("");
   const [newKind, setNewKind] = useState("group"); // group | channel
   const [channelResults, setChannelResults] = useState([]);
+  const [pendingMedia, setPendingMedia] = useState(null); // { file, url, kind, orig }
+  const [call, setCall] = useState(null); // { peer, dir, status, video, startedAt }
+  const [callMuted, setCallMuted] = useState(false);
+  const [callCamOff, setCallCamOff] = useState(false);
+  const [, setCallTick] = useState(0);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showContacts, setShowContacts] = useState(false);
+  const [showCalls, setShowCalls] = useState(false);
+  const [statusPick, setStatusPick] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -180,6 +206,17 @@ export default function App() {
   const lpTimer = useRef(null);
   const originalRef = useRef(false);
   const msgRefs = useRef({});
+  const meBannerInp = useRef(null);
+  const groupBannerInp = useRef(null);
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteAudioRef = useRef(null);
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const sigChans = useRef({});
+  const candQueue = useRef([]);
+  const ringRef = useRef(null);
+  const callRef = useRef(null);
   const activeIdRef = useRef(null);
   activeIdRef.current = activeId;
 
@@ -337,8 +374,15 @@ export default function App() {
         });
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "chats" }, (p) => {
+        if (p.eventType === "DELETE" || !p.new) {
+          const oldId = p.old?.id;
+          if (oldId) {
+            setChats((cs) => cs.filter((x) => x.id !== oldId));
+            if (activeIdRef.current === oldId) setActiveId(null);
+          }
+          return;
+        }
         const c = p.new;
-        if (!c) return;
         setChats((cs) => (cs.some((x) => x.id === c.id) ? cs.map((x) => (x.id === c.id ? c : x)) : cs));
         if (!c.is_group && (c.u1 === me.id || c.u2 === me.id)) {
           setChats((cs) => (cs.some((x) => x.id === c.id) ? cs : [...cs, c]));
@@ -390,6 +434,62 @@ export default function App() {
     return () => { supabase.removeChannel(ch); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, me?.id]);
+
+  // ---------- ЗВОНКИ: входящие ----------
+  useEffect(() => { callRef.current = call; }, [call]);
+  useEffect(() => {
+    if (phase !== "main" || !me) return;
+    const ch = supabase.channel(`call-${me.id}`)
+      .on("broadcast", { event: "offer" }, async (p) => {
+        const { from, sdp, video, name } = p.payload || {};
+        if (!from || from === me.id) return;
+        if (callRef.current) { signal(from, "hangup", { busy: true }); return; }
+        let u = profiles[from];
+        if (!u) {
+          const { data } = await supabase.from("profiles").select("*").eq("id", from).single();
+          u = data; if (u) cacheProfiles([u]);
+        }
+        candQueue.current = [];
+        ringStart();
+        setCallMuted(false); setCallCamOff(false);
+        setCall({ peer: u || { id: from, login: name || "Звонок", tag: "?" }, dir: "in", status: "ringing", video: !!video, sdp });
+      })
+      .on("broadcast", { event: "answer" }, async (p) => {
+        const c = callRef.current;
+        if (!c || c.dir !== "out" || !pcRef.current) return;
+        try {
+          await pcRef.current.setRemoteDescription(p.payload.sdp);
+          for (const cand of candQueue.current) { try { await pcRef.current.addIceCandidate(cand); } catch {} }
+          candQueue.current = [];
+          setCall({ ...c, status: "active", startedAt: Date.now() });
+        } catch {}
+      })
+      .on("broadcast", { event: "candidate" }, async (p) => {
+        const cand = p.payload?.candidate;
+        if (!cand) return;
+        if (pcRef.current?.remoteDescription) { try { await pcRef.current.addIceCandidate(cand); } catch {} }
+        else candQueue.current.push(cand);
+      })
+      .on("broadcast", { event: "hangup" }, () => {
+        if (callRef.current) { notify(callRef.current.status === "ringing" ? "Звонок завершён" : "Собеседник завершил звонок"); endCall(false); }
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, me?.id]);
+  useEffect(() => {
+    if (call?.status !== "active") return;
+    const t = setInterval(() => setCallTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [call?.status]);
+
+  useEffect(() => {
+    if (!showContacts) return;
+    const missing = [...friends].filter((id) => !profiles[id]);
+    if (!missing.length) return;
+    supabase.from("profiles").select("*").in("id", missing).then(({ data }) => data && cacheProfiles(data));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showContacts]);
 
   // ---------- PRESENCE ----------
   useEffect(() => {
@@ -453,6 +553,10 @@ export default function App() {
     const onKey = (e) => {
       if (e.key !== "Escape") return;
       if (menu) setMenu(null);
+      else if (statusPick) setStatusPick(false);
+      else if (showContacts) setShowContacts(false);
+      else if (showCalls) setShowCalls(false);
+      else if (showMenu) setShowMenu(false);
       else if (viewer) setViewer(null);
       else if (reactFor) setReactFor(null);
       else if (showProfile) setShowProfile(false);
@@ -463,7 +567,17 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick]);
+  useEffect(() => {
+    if (!activeId) return;
+    const onPaste = (e) => {
+      const f = e.clipboardData?.files?.[0];
+      if (f) { e.preventDefault(); routeFile(f); }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
   const swipe = useRef(null);
   function mainTouchStart(e) { const t = e.touches[0]; swipe.current = { x: t.clientX, y: t.clientY }; }
   function mainTouchEnd(e) {
@@ -679,6 +793,113 @@ export default function App() {
     }
     openChat(fav.id);
   }
+  // ====== ЗВОНКИ (WebRTC, сигналинг через Supabase Realtime) ======
+  function chanFor(uid) {
+    if (sigChans.current[uid]) return sigChans.current[uid];
+    const ch = supabase.channel(`call-${uid}`);
+    const ready = new Promise((res) => ch.subscribe((st) => st === "SUBSCRIBED" && res()));
+    sigChans.current[uid] = { ch, ready };
+    return sigChans.current[uid];
+  }
+  async function signal(to, event, payload) {
+    const { ch, ready } = chanFor(to);
+    await ready;
+    ch.send({ type: "broadcast", event, payload: { from: me.id, ...payload } });
+  }
+  function newPC(peerId) {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    pc.onicecandidate = (e) => { if (e.candidate) signal(peerId, "candidate", { candidate: e.candidate.toJSON() }); };
+    pc.ontrack = (e) => {
+      const stream = e.streams[0];
+      if (remoteAudioRef.current) remoteAudioRef.current.srcObject = stream;
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
+    };
+    pc.onconnectionstatechange = () => {
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) endCall(false);
+    };
+    pcRef.current = pc;
+    return pc;
+  }
+  function ringStart() {
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtxRef.current;
+      ringRef.current = setInterval(() => {
+        const o = ctx.createOscillator(); const g = ctx.createGain();
+        o.frequency.value = 660; g.gain.setValueAtTime(0.06, ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.4);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(); o.stop(ctx.currentTime + 0.45);
+      }, 1500);
+    } catch {}
+  }
+  function ringStop() { clearInterval(ringRef.current); ringRef.current = null; }
+  async function startCall(withVideo, target) {
+    const to = target || peer;
+    if (call) { notify("Звонок уже идёт."); return; }
+    if (!to || to.id === me.id) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: withVideo });
+      localStreamRef.current = stream;
+      if (withVideo && localVideoRef.current) localVideoRef.current.srcObject = stream;
+      const pc = newPC(to.id);
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await signal(to.id, "offer", { sdp: pc.localDescription, video: withVideo, name: me.login });
+      setCallMuted(false); setCallCamOff(false);
+      setCall({ peer: to, dir: "out", status: "ringing", video: withVideo });
+    } catch {
+      notify("Не удалось получить доступ к микрофону/камере.");
+    }
+  }
+  async function acceptCall() {
+    const c = callRef.current;
+    if (!c?.sdp) return;
+    ringStop();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: c.video });
+      localStreamRef.current = stream;
+      if (c.video && localVideoRef.current) localVideoRef.current.srcObject = stream;
+      const pc = newPC(c.peer.id);
+      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+      await pc.setRemoteDescription(c.sdp);
+      for (const cand of candQueue.current) { try { await pc.addIceCandidate(cand); } catch {} }
+      candQueue.current = [];
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await signal(c.peer.id, "answer", { sdp: pc.localDescription });
+      setCall({ ...c, status: "active", startedAt: Date.now() });
+    } catch {
+      notify("Не удалось получить доступ к микрофону/камере.");
+      endCall(true);
+    }
+  }
+  function endCall(notifyPeer = true) {
+    ringStop();
+    const c = callRef.current;
+    if (c?.peer?.id) {
+      const dur = c.startedAt ? Math.round((Date.now() - c.startedAt) / 1000) : 0;
+      const entry = { peerId: c.peer.id, name: c.peer.login, dir: c.dir, video: !!c.video, ts: Date.now(), dur };
+      setPrefsAnd({ callLog: [entry, ...(prefs.callLog || [])].slice(0, 30) });
+    }
+    if (notifyPeer && c) signal(c.peer.id, "hangup", {});
+    try { pcRef.current?.close(); } catch {}
+    pcRef.current = null;
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    localStreamRef.current = null;
+    candQueue.current = [];
+    setCall(null);
+  }
+  function toggleCallMute() {
+    const tr = localStreamRef.current?.getAudioTracks()?.[0];
+    if (tr) { tr.enabled = !tr.enabled; setCallMuted(!tr.enabled); }
+  }
+  function toggleCallCam() {
+    const tr = localStreamRef.current?.getVideoTracks()?.[0];
+    if (tr) { tr.enabled = !tr.enabled; setCallCamOff(!tr.enabled); }
+  }
+
   function openFolderEditor(f) {
     setFolderName(f === "new" ? "" : f.name);
     setFolderIds(new Set(f === "new" ? [] : f.chatIds));
@@ -714,14 +935,12 @@ export default function App() {
     const kind = crop?.kind;
     setCrop(null);
     try {
-      if (kind === "me") {
-        const b64 = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
-        await saveProfile({ avatar: b64 });
-      } else {
-        const url = await uploadMedia(blob, "jpg", "image/jpeg");
-        await saveGroup({ avatar: url });
-      }
-    } catch { notify("Не удалось сохранить аватар."); }
+      if (kind === "me") await saveProfile({ avatar: await blobToB64(blob) });
+      else if (kind === "group") await saveGroup({ avatar: await uploadMedia(blob, "jpg", "image/jpeg") });
+      else if (kind === "meBanner") await saveProfile({ banner_img: await uploadMedia(blob, "jpg", "image/jpeg"), banner_color: null });
+      else if (kind === "groupBanner") await saveGroup({ banner_img: await uploadMedia(blob, "jpg", "image/jpeg") });
+      else if (kind === "wallpaper") await setPrefsAnd({ customWallpaper: await blobToB64(blob), wallpaper: "custom" });
+    } catch { notify("Не удалось сохранить изображение."); }
   }
 
   function openChat(id) {
@@ -733,7 +952,7 @@ export default function App() {
 
   // ---------- СООБЩЕНИЯ ----------
   const senderName = (m) => (m.sender_id === me?.id ? "Вы" : profiles[m.sender_id]?.login || "?");
-  const senderColor = (id) => ACCENTS[(id?.charCodeAt(2) || 0) % ACCENTS.length];
+  const senderColor = (id) => prefs.nickColor || ACCENTS[(id?.charCodeAt(2) || 0) % ACCENTS.length];
   const previewOf = (m) => m.type === "text" ? m.content.slice(0, 60) : { photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "";
 
   async function sendMessage(payload) {
@@ -770,13 +989,25 @@ export default function App() {
   }
   const extOf = (name, fallback) => (name?.includes(".") ? name.split(".").pop().slice(0, 8) : fallback);
 
-  async function handleMedia(file) {
+  function handleMedia(file) {
     if (!file) return;
+    if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) return;
+    const orig = originalRef.current; originalRef.current = false;
+    setPendingMedia({ file, url: URL.createObjectURL(file), kind: file.type.startsWith("video/") ? "video" : "image", orig });
+  }
+  function routeFile(f) {
+    if (!f) return;
+    if (f.type.startsWith("image/") || f.type.startsWith("video/")) handleMedia(f);
+    else handleFile(f);
+  }
+  async function confirmSendMedia() {
+    const pm = pendingMedia;
+    setPendingMedia(null);
+    const file = pm.file;
     try {
       if (file.type.startsWith("image/")) {
         notify("Загружаем фото…");
-        const orig = originalRef.current; originalRef.current = false;
-        const url = orig
+        const url = (pm.orig || file.type === "image/gif")
           ? await uploadMedia(file, extOf(file.name, "png"), file.type || "image/png")
           : await uploadMedia(await resizeToBlob(file, 1100, 0.78), "jpg", "image/jpeg");
         await sendMessage({ type: "photo", content: url, file_name: file.name });
@@ -932,7 +1163,17 @@ export default function App() {
     "--accent": prefs.accent,
     "--accent-dim": prefs.accent + "55",
     "--accent-light": prefs.accent + "33",
+    "--app-font": (FONTS.find((f) => f.id === prefs.font) || FONTS[0]).css,
+    ...(prefs.bubbleColor ? { "--bub-out": prefs.bubbleColor } : {}),
   };
+  useEffect(() => {
+    const link = document.querySelector("link[rel='icon']");
+    const ic = APP_ICONS.find((i) => i.id === prefs.icon) || APP_ICONS[0];
+    if (link && ic) link.href = ic.file;
+  }, [prefs.icon]);
+  const bannerCss = (o) => o?.banner_img
+    ? { backgroundImage: `url(${o.banner_img})`, backgroundSize: "cover", backgroundPosition: "center" }
+    : { background: o?.banner_color || BANNERS[o?.banner] || BANNERS[0] };
   const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
   const sortedChats = useMemo(() => [...chats].sort((a, b) => {
     const la = lastMsgOf(a) ? new Date(lastMsgOf(a).created_at).getTime() : new Date(a.created_at).getTime();
@@ -1019,30 +1260,54 @@ export default function App() {
       onClick={() => { menu && setMenu(null); showAttach && setShowAttach(false); }}>
       <style>{css}</style>
 
-      <input ref={avatarInp} type="file" accept="image/*" hidden onChange={(e) => {
+      <input ref={avatarInp} type="file" accept="image/*" hidden onChange={async (e) => {
         const f = e.target.files[0]; e.target.value = "";
-        if (f) setCrop({ src: URL.createObjectURL(f), kind: "me" });
+        if (!f) return;
+        if (f.type === "image/gif") {
+          try { const url = await uploadMedia(f, "gif", "image/gif"); await saveProfile({ avatar: url }); }
+          catch { notify("Не удалось загрузить GIF."); }
+        } else setCrop({ src: URL.createObjectURL(f), kind: "me" });
+      }} />
+      <input ref={meBannerInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        if (f.type === "image/gif") {
+          try { const url = await uploadMedia(f, "gif", "image/gif"); await saveProfile({ banner_img: url, banner_color: null }); }
+          catch { notify("Не удалось загрузить GIF."); }
+        } else setCrop({ src: URL.createObjectURL(f), kind: "meBanner" });
+      }} />
+      <input ref={groupBannerInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        if (f.type === "image/gif") {
+          try { const url = await uploadMedia(f, "gif", "image/gif"); await saveGroup({ banner_img: url }); }
+          catch { notify("Не удалось загрузить GIF."); }
+        } else setCrop({ src: URL.createObjectURL(f), kind: "groupBanner" });
       }} />
       <input ref={mediaInp} type="file" accept="image/*,video/*" hidden onChange={(e) => { handleMedia(e.target.files[0]); e.target.value = ""; }} />
       <input ref={fileInp} type="file" hidden onChange={(e) => { handleFile(e.target.files[0]); e.target.value = ""; }} />
-      <input ref={wpInp} type="file" accept="image/*" hidden onChange={async (e) => {
+      <input ref={wpInp} type="file" accept="image/*" hidden onChange={(e) => {
         const f = e.target.files[0]; e.target.value = "";
         if (!f) return;
-        try {
-          const data = await resizeImage(f, 1280, 0.6);
-          await setPrefsAnd({ customWallpaper: data, wallpaper: "custom" });
-        } catch { notify("Не удалось обработать изображение."); }
+        if (f.type === "image/gif") {
+          if (f.size > 3 * 1048576) { notify("GIF для обоев — до 3 МБ."); return; }
+          fileToB64(f).then((b64) => setPrefsAnd({ customWallpaper: b64, wallpaper: "custom" }));
+        } else setCrop({ src: URL.createObjectURL(f), kind: "wallpaper" });
       }} />
 
-      <input ref={groupAvaInp} type="file" accept="image/*" hidden onChange={(e) => {
+      <input ref={groupAvaInp} type="file" accept="image/*" hidden onChange={async (e) => {
         const f = e.target.files[0]; e.target.value = "";
-        if (f) setCrop({ src: URL.createObjectURL(f), kind: "group" });
+        if (!f) return;
+        if (f.type === "image/gif") {
+          try { const url = await uploadMedia(f, "gif", "image/gif"); await saveGroup({ avatar: url }); }
+          catch { notify("Не удалось загрузить GIF."); }
+        } else setCrop({ src: URL.createObjectURL(f), kind: "group" });
       }} />
 
       {/* ЛЕВАЯ ПАНЕЛЬ */}
       <div className="side">
         <div className="side-top">
-          <button className="icon-btn" title="Профиль и настройки" onClick={() => setShowProfile(true)}>☰</button>
+          <button className="icon-btn" title="Меню" onClick={() => setShowMenu(true)}>☰</button>
           <input className="search-input" placeholder="Найти по @тегу…" value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)} />
           <button className="icon-btn" title="Избранное" onClick={openFavorites}>⭐</button>
@@ -1137,7 +1402,7 @@ export default function App() {
             </div>
             <div className="ch-info" onClick={() => setShowChatInfo(true)} title={isGroup ? "Об этой группе" : "Открыть профиль"}>
               <div className="ch-name">
-                {chatTitle(activeChat)}
+                {chatTitle(activeChat)}{!isGroup && peer?.status_emoji ? ` ${peer.status_emoji}` : ""}
                 {!isGroup && <span className="muted" style={{ fontWeight: 400, fontSize: 13 }}> @{peer?.tag}</span>}
               </div>
               <div className={`ch-status${(isGroup ? typingNames.length : (isOn(peer) || typingNames.length)) ? " on" : ""}`}>
@@ -1148,6 +1413,10 @@ export default function App() {
                     : activeChat.u1 === activeChat.u2 ? "ваши заметки" : lastSeenText(peer)}
               </div>
             </div>
+            {!isGroup && peer && peer.id !== me.id && (<>
+              <button className="icon-btn" title="Аудиозвонок" onClick={() => startCall(false)}>📞</button>
+              <button className="icon-btn" title="Видеозвонок" onClick={() => startCall(true)}>🎥</button>
+            </>)}
             <button className="icon-btn" title="Поиск по чату" onClick={() => setChatSearch(chatSearch === null ? "" : null)}>🔍</button>
           </div>
 
@@ -1170,7 +1439,9 @@ export default function App() {
             <div className="pin-bar" style={{ borderLeftColor: "#D9534F" }}>🚫 <span>Вы заблокировали этого пользователя — он не сможет вам написать.</span>
               <button className="chip" onClick={() => toggleBlock(peer)}>Разблокировать</button></div>
           )}
-          <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={{ background: wpCss || undefined }}>
+          <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={{ background: wpCss || undefined }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); routeFile(e.dataTransfer.files?.[0]); }}>
             {(chatSearch ? activeMsgs.filter((m) => m.type === "text" && m.content.toLowerCase().includes(chatSearch.toLowerCase())) : activeMsgs).map((m, i, arr) => {
               const prev = arr[i - 1];
               const ts = new Date(m.created_at).getTime();
@@ -1180,10 +1451,16 @@ export default function App() {
               const url = m.type === "text" ? findUrl(m.content) : null;
               const showAsPhoto = m.type === "photo" || (m.type === "file" && isImg(m));
               const showSender = isGroup && !isChannel && !out && (!prev || prev.sender_id !== m.sender_id);
+              const showAva = isGroup && !isChannel && !out && (!arr[i + 1] || arr[i + 1].sender_id !== m.sender_id);
               return (
                 <div key={m.id} ref={(el) => { if (el) msgRefs.current[m.id] = el; }}>
                   {newDay && <div style={{ display: "flex", justifyContent: "center" }}><span className="day-sep">{fmtDay(m.created_at)}</span></div>}
                   <div className={`bubble-row ${out ? "out" : "in"}`}>
+                    {isGroup && !isChannel && !out && (
+                      <div className="msg-ava" onClick={() => profiles[m.sender_id] && setShowMember(profiles[m.sender_id])}>
+                        {showAva && <Avatar user={profiles[m.sender_id]} size="xs" />}
+                      </div>
+                    )}
                     <div className={`bubble ${out ? "out" : "in"}${flashId === m.id ? " flash" : ""}`}
                       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openMenuAt(e.clientX, e.clientY, m); }}
                       onDoubleClick={() => toggleReaction(m, "❤️")}
@@ -1282,6 +1559,107 @@ export default function App() {
           )}
         </>)}
       </div>
+
+      {/* БОКОВОЕ МЕНЮ */}
+      {showMenu && (<>
+        <div className="drawer-ov" onClick={() => setShowMenu(false)} />
+        <div className="drawer">
+          <div className="drawer-head">
+            <div onClick={() => { setShowMenu(false); setShowProfile(true); }} style={{ cursor: "pointer", display: "inline-block" }}>
+              <Avatar user={me} />
+            </div>
+            <div className="drawer-name" onClick={() => { setShowMenu(false); setShowProfile(true); }} style={{ cursor: "pointer" }}>
+              {me.login}{me.status_emoji ? ` ${me.status_emoji}` : ""} <span className="muted" style={{ marginLeft: "auto", fontSize: 13 }}>▾</span>
+            </div>
+            <div className="drawer-status" onClick={() => setStatusPick(true)}>Сменить эмодзи-статус</div>
+          </div>
+          <div className="d-sep" />
+          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">👤</span> Мой профиль</button>
+          <div className="d-sep" />
+          <button className="d-row" onClick={() => { setShowMenu(false); setNewKind("group"); setShowGroupNew(true); }}><span className="d-ic">👥</span> Новая группа</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setNewKind("channel"); setShowGroupNew(true); }}><span className="d-ic">📣</span> Новый канал</button>
+          <button className="d-row" onClick={() => { setShowContacts(true); }}><span className="d-ic">👫</span> Контакты</button>
+          <button className="d-row" onClick={() => { setShowCalls(true); }}><span className="d-ic">📞</span> Звонки</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> Избранное</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> Настройки</button>
+          <button className="d-row" onClick={() => setPrefsAnd({ theme: prefs.theme === "light" ? "dark" : "light" })}>
+            <span className="d-ic">🌙</span> Ночной режим
+            <span className="right"><span className={`toggle${prefs.theme !== "light" ? " on" : ""}`} style={{ display: "inline-block" }} /></span>
+          </button>
+        </div>
+      </>)}
+
+      {/* ЭМОДЗИ-СТАТУС */}
+      {statusPick && (
+        <div className="overlay" style={{ zIndex: 72 }} onClick={() => setStatusPick(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>Эмодзи-статус</h3>
+              <div className="emoji-tabs">
+                {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
+              </div>
+              <div className="emoji-grid">
+                {EMOJI[emojiTab].map((e) => <button key={e} onClick={() => { saveProfile({ status_emoji: e }); setStatusPick(false); }}>{e}</button>)}
+              </div>
+              <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => { saveProfile({ status_emoji: null }); setStatusPick(false); }}>Убрать статус</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* КОНТАКТЫ */}
+      {showContacts && (
+        <div className="overlay" style={{ zIndex: 68 }} onClick={() => setShowContacts(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>👫 Контакты</h3>
+              {[...friends].map((id) => profiles[id]).filter(Boolean).map((u) => (
+                <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => setShowMember(u)}>
+                  <Avatar user={u} size="sm" online={isOn(u)} />
+                  <span className="mr-name">{u.login}{u.status_emoji ? ` ${u.status_emoji}` : ""} <span className="muted">@{u.tag}</span></span>
+                  <span style={{ fontSize: 12.5, color: isOn(u) ? "var(--accent)" : "var(--muted)" }}>{isOn(u) ? "онлайн" : ""}</span>
+                </div>
+              ))}
+              {friends.size === 0 && <p className="muted" style={{ textAlign: "center", padding: 14 }}>Пока пусто. Добавляйте людей в друзья из их профилей.</p>}
+              <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowContacts(false)}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ЖУРНАЛ ЗВОНКОВ */}
+      {showCalls && (
+        <div className="overlay" style={{ zIndex: 68 }} onClick={() => setShowCalls(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>📞 Звонки</h3>
+              {(prefs.callLog || []).map((en, i) => (
+                <div className="member-row" key={i} style={{ cursor: "pointer" }}
+                  onClick={async () => {
+                    let u = profiles[en.peerId];
+                    if (!u) {
+                      const { data } = await supabase.from("profiles").select("*").eq("id", en.peerId).single();
+                      u = data; if (u) cacheProfiles([u]);
+                    }
+                    if (u) { setShowCalls(false); setShowMenu(false); startChat(u); }
+                  }}>
+                  <span style={{ fontSize: 18 }}>{en.video ? "🎥" : "📞"}</span>
+                  <span className="mr-name">
+                    {en.name || "?"}
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {en.dir === "in" ? (en.dur ? "Входящий" : "Пропущенный") : "Исходящий"}
+                      {en.dur ? ` · ${Math.floor(en.dur / 60)}:${String(en.dur % 60).padStart(2, "0")}` : ""}
+                    </div>
+                  </span>
+                  <span className="muted" style={{ fontSize: 12 }}>{new Date(en.ts).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+                </div>
+              ))}
+              {!(prefs.callLog || []).length && <p className="muted" style={{ textAlign: "center", padding: 14 }}>Журнал пуст. Кнопки звонка — в шапке личного чата.</p>}
+              <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowCalls(false)}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* КОНТЕКСТНОЕ МЕНЮ */}
       {menu && (
@@ -1408,10 +1786,11 @@ export default function App() {
                       onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== activeChat.title && saveGroup({ title: e.target.value.trim() })} />
                     <input className="field" placeholder="Описание группы" maxLength={200} defaultValue={activeChat.description || ""}
                       onBlur={(e) => e.target.value !== (activeChat.description || "") && saveGroup({ description: e.target.value })} />
-                    <h3>Баннер группы</h3>
+                    <h3>Баннер</h3>
                     <div className="swatches">
-                      {BANNERS.map((b, i) => <div key={i} className={`sw${activeChat.banner === i ? " sel" : ""}`} style={{ background: b }} onClick={() => saveGroup({ banner: i })} />)}
+                      {BANNERS.map((b, i) => <div key={i} className={`sw${activeChat.banner === i && !activeChat.banner_img ? " sel" : ""}`} style={{ background: b }} onClick={() => saveGroup({ banner: i, banner_img: null })} />)}
                     </div>
+                    <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => groupBannerInp.current?.click()}>🖼 Свой баннер (фото или GIF)</button>
                   </>)}
                   <h3>Участники и права</h3>
                   {activeMembers.map((u) => (
@@ -1449,9 +1828,20 @@ export default function App() {
                       <span className="badge">＋</span>
                     </div>
                   ))}
+                  {amOwner && (
+                    <button className="btn" style={{ background: "#D9534F", marginTop: 14 }}
+                      onClick={async () => {
+                        const { error } = await supabase.from("chats").delete().eq("id", activeId);
+                        if (error) { notify(`Не удалось удалить: ${error.message}`); return; }
+                        notify(isChannel ? "Канал удалён" : "Группа удалена");
+                        setShowChatInfo(false); setGroupEdit(false);
+                        setChats((cs) => cs.filter((c) => c.id !== activeId));
+                        setActiveId(null);
+                      }}>🗑 Удалить {isChannel ? "канал" : "группу"} навсегда</button>
+                  )}
                 </div>
               ) : (<>
-                <div className="banner" style={{ background: BANNERS[activeChat.banner] || BANNERS[7] }}>
+                <div className="banner" style={activeChat.banner_img ? bannerCss(activeChat) : { background: BANNERS[activeChat.banner] || BANNERS[7] }}>
                   <GroupAvatar chat={activeChat} size="lg" />
                 </div>
                 <div className="modal-pad" style={{ paddingTop: 58 }}>
@@ -1491,6 +1881,7 @@ export default function App() {
                     ))}
                   </div>
 
+                  {(!isChannel || canPost) && (<>
                   <h3>Участники</h3>
                   {activeMembers.map((u) => (
                     <div className="member-row" key={u.id} style={{ cursor: u.id === me.id ? "default" : "pointer" }}
@@ -1500,15 +1891,16 @@ export default function App() {
                       <span style={{ fontSize: 12.5, color: isOn(u) ? "var(--accent)" : "var(--muted)" }}>{isOn(u) ? "онлайн" : ""}</span>
                     </div>
                   ))}
+                  </>)}
                   <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowChatInfo(false)}>Закрыть</button>
                 </div>
               </>)
             ) : peer ? (<>
-              <div className="banner" style={{ background: peer.banner_color || BANNERS[peer.banner] || BANNERS[0] }}>
+              <div className="banner" style={bannerCss(peer)}>
                 <Avatar user={peer} size="lg" />
               </div>
               <div className="modal-pad" style={{ paddingTop: 58 }}>
-                <div style={{ fontWeight: 700, fontSize: 19 }}>{peer.login}</div>
+                <div style={{ fontWeight: 700, fontSize: 19 }}>{peer.login}{peer.status_emoji ? ` ${peer.status_emoji}` : ""}</div>
                 <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
                 {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
                 <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
@@ -1529,118 +1921,151 @@ export default function App() {
       {showProfile && (
         <div className="overlay" onClick={() => setShowProfile(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="banner" style={{ background: myBanner }}>
-              <div onClick={() => avatarInp.current?.click()} title="Сменить аватар">
+            <div className="banner" style={bannerCss(me)}>
+              <div onClick={() => avatarInp.current?.click()} title="Сменить аватар (GIF — анимированный)">
                 <Avatar user={me} size="lg" />
               </div>
             </div>
             <div className="modal-pad" style={{ paddingTop: 58 }}>
               <div style={{ fontWeight: 700, fontSize: 19 }}>{me.login}</div>
               <div className="muted" style={{ fontSize: 14, marginBottom: 10 }}>@{me.tag} · нажмите на аватар, чтобы сменить</div>
-              <input className="field" placeholder="О себе (до 200 символов)" maxLength={200} defaultValue={me.bio}
-                onBlur={(e) => e.target.value !== me.bio && saveProfile({ bio: e.target.value })} />
-              <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
 
-              <h3>Баннер профиля</h3>
-              <div className="swatches">
-                {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i && !me.banner_color ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i, banner_color: null })} />)}
-                <label className="sw rainbow" title="Свой цвет баннера"><input type="color" value={me.banner_color || "#5AABF0"} onChange={(e) => saveProfile({ banner_color: e.target.value })} /></label>
-              </div>
-
-              <h3>Рамка аватара</h3>
-              <div className="swatches">
-                {FRAMES.map((f) => (
-                  <div key={f.id} className={`sw${(me.frame || "none") === f.id ? " sel" : ""}`}
-                    style={{ background: f.id === "none" ? "var(--input)" : f.css }} title={f.name} onClick={() => saveProfile({ frame: f.id })} />
-                ))}
-                <label className="sw rainbow" title="Свой цвет рамки"><input type="color" value={me.frame?.startsWith?.("#") ? me.frame : "#5AABF0"} onChange={(e) => saveProfile({ frame: e.target.value })} /></label>
-              </div>
-
-              <h3>Тема</h3>
-              <div className="theme-row">
-                {[["light", "Светлая"], ["dark", "Тёмная"], ["amoled", "AMOLED"]].map(([v, l]) => (
-                  <button key={v} className={`btn${prefs.theme === v ? "" : " ghost"}`} style={{ padding: "8px 4px", fontSize: 13 }}
-                    onClick={() => setPrefsAnd({ theme: v })}>{l}</button>
-                ))}
-              </div>
-              <h3>Акцентный цвет</h3>
-              <div className="swatches">
-                {ACCENTS.map((c) => <div key={c} className={`sw${prefs.accent === c ? " sel" : ""}`} style={{ background: c }} onClick={() => setPrefsAnd({ accent: c })} />)}
-                <label className="sw rainbow" title="Свой цвет"><input type="color" value={prefs.accent} onChange={(e) => setPrefsAnd({ accent: e.target.value })} /></label>
-              </div>
-
-              <h3>Обои чата</h3>
-              <div className="wp-grid">
-                {WALLPAPERS.map((w, i) => (
-                  <div key={i} className={`wp${prefs.wallpaper === i ? " sel" : ""}`} style={{ background: w.css || "var(--input)" }}
-                    onClick={() => setPrefsAnd({ wallpaper: i })}>{w.name}</div>
-                ))}
-                <div className={`wp${prefs.wallpaper === "custom" ? " sel" : ""}`}
-                  style={{ backgroundImage: prefs.customWallpaper ? `url(${prefs.customWallpaper})` : undefined }}
-                  onClick={() => wpInp.current?.click()}>Своя 📁</div>
-              </div>
-
-              <div className="toggle-row" style={{ marginTop: 12 }}>
-                <span>🔊 Звук при печати</span>
-                <button className={`toggle${prefs.typeSound ? " on" : ""}`} onClick={() => setPrefsAnd({ typeSound: !prefs.typeSound })} />
-              </div>
-
-              <h3>Быстрые ответы (до 5, отправляются в один клик)</h3>
-              {Array.from({ length: 5 }).map((_, i) => (
-                <input key={i} className="field" style={{ marginBottom: 6, padding: "8px 12px" }} placeholder={`Фраза ${i + 1}`}
-                  defaultValue={prefs.quickReplies?.[i] || ""}
-                  onBlur={(e) => {
-                    const qr = [...(prefs.quickReplies || [])];
-                    qr[i] = e.target.value;
-                    setPrefsAnd({ quickReplies: qr.filter(Boolean).slice(0, 5) });
-                  }} />
-              ))}
-
-              {amAppAdmin && (<>
-                <h3>📢 Админ мессенджера</h3>
-                <input className="field" placeholder="Текст объявления" maxLength={120} value={annText}
-                  onChange={(e) => setAnnText(e.target.value)} />
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="btn" style={{ flex: 1 }} disabled={!annText.trim()}
-                    onClick={async () => {
-                      const ts = new Date().toISOString();
-                      const { error } = await supabase.from("app_settings")
-                        .update({ announcement: annText.trim(), announcement_at: ts }).eq("id", 1);
-                      if (error) notify(`Не удалось: ${error.message}`);
-                      else { setAppSettings((st) => ({ ...st, announcement: annText.trim(), announcement_at: ts })); setAnnText(""); notify("Объявление опубликовано ✓"); }
-                    }}>Опубликовать</button>
-                  <button className="btn ghost" style={{ flex: 1 }}
-                    onClick={async () => {
-                      const { error } = await supabase.from("app_settings").update({ announcement: null }).eq("id", 1);
-                      if (error) notify(`Не удалось: ${error.message}`);
-                      else { setAppSettings((st) => ({ ...st, announcement: null })); notify("Объявление снято"); }
-                    }}>Убрать</button>
+              <div className="sec">
+                <h3>Профиль</h3>
+                <input className="field" placeholder="О себе (до 200 символов)" maxLength={200} defaultValue={me.bio}
+                  onBlur={(e) => e.target.value !== me.bio && saveProfile({ bio: e.target.value })} />
+                <h3>Баннер</h3>
+                <div className="swatches">
+                  {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i && !me.banner_color && !me.banner_img ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i, banner_color: null, banner_img: null })} />)}
+                  <label className="sw rainbow" title="Свой цвет баннера"><input type="color" value={me.banner_color || "#5AABF0"} onChange={(e) => saveProfile({ banner_color: e.target.value, banner_img: null })} /></label>
                 </div>
-                <p className="stat">Объявление видят все пользователи; клик по нему открывает главный канал. Назначить главный канал: откройте свой канал → нажмите на шапку → «📌 Сделать главным каналом».</p>
-              </>)}
+                <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => meBannerInp.current?.click()}>🖼 Свой баннер (фото или GIF)</button>
+                <h3>Рамка аватара</h3>
+                <div className="swatches">
+                  {FRAMES.map((f) => (
+                    <div key={f.id} className={`sw${(me.frame || "none") === f.id ? " sel" : ""}`}
+                      style={{ background: f.id === "none" ? "var(--bg)" : f.css }} title={f.name} onClick={() => saveProfile({ frame: f.id })} />
+                  ))}
+                  <label className="sw rainbow" title="Свой цвет рамки"><input type="color" value={me.frame?.startsWith?.("#") ? me.frame : "#5AABF0"} onChange={(e) => saveProfile({ frame: e.target.value })} /></label>
+                </div>
+                <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
+              </div>
 
-              <h3>Аккаунт</h3>
-              <input className="field" placeholder="Отображаемое имя" maxLength={24} defaultValue={me.login}
-                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== me.login) saveProfile({ login: v }); }} />
-              <input className="field" placeholder="Сменить @тег" defaultValue={me.tag}
-                onBlur={async (e) => {
-                  const t = e.target.value.trim().replace(/^@/, "");
-                  if (!t || t === me.tag) return;
-                  if (!/^[a-zA-Z0-9_]{3,20}$/.test(t)) { notify("Тег: 3–20 символов, латиница, цифры, _"); return; }
-                  const { error } = await supabase.from("profiles").update({ tag: t }).eq("id", me.id);
-                  if (error) { notify(error.code === "23505" ? "Этот тег уже занят." : `Не удалось: ${error.message}`); return; }
-                  const next = { ...me, tag: t }; setMe(next); cacheProfiles([next]); notify("Тег обновлён ✓");
-                }} />
-              <input className="field" type="password" placeholder="Новый пароль — введите и нажмите Enter"
-                onKeyDown={async (e) => {
-                  if (e.key !== "Enter") return;
-                  const v = e.target.value;
-                  if (v.length < 6) { notify("Пароль — минимум 6 символов."); return; }
-                  const { error } = await supabase.auth.updateUser({ password: v });
-                  if (error) { notify(`Не удалось сменить пароль: ${error.message}`); return; }
-                  e.target.value = ""; notify("Пароль изменён ✓");
-                }} />
-              <p className="stat">Имя и @тег меняются сразу. Логин для входа остаётся прежним.</p>
+              <div className="sec">
+                <h3>Тема приложения</h3>
+                <div className="theme-row">
+                  {[["light", "Светлая"], ["dark", "Тёмная"], ["amoled", "AMOLED"]].map(([v, l]) => (
+                    <button key={v} className={`btn${prefs.theme === v ? "" : " ghost"}`} style={{ padding: "8px 4px", fontSize: 13 }}
+                      onClick={() => setPrefsAnd({ theme: v })}>{l}</button>
+                  ))}
+                </div>
+                <h3>Акцентный цвет</h3>
+                <div className="swatches">
+                  {ACCENTS.map((c) => <div key={c} className={`sw${prefs.accent === c ? " sel" : ""}`} style={{ background: c }} onClick={() => setPrefsAnd({ accent: c })} />)}
+                  <label className="sw rainbow" title="Свой цвет"><input type="color" value={prefs.accent} onChange={(e) => setPrefsAnd({ accent: e.target.value })} /></label>
+                </div>
+                <h3>Цвет моих сообщений</h3>
+                <div className="swatches">
+                  <div className={`sw${!prefs.bubbleColor ? " sel" : ""} sw-auto`} onClick={() => setPrefsAnd({ bubbleColor: null })}>авто</div>
+                  <label className="sw rainbow" title="Свой цвет пузырей"><input type="color" value={prefs.bubbleColor || "#2B5278"} onChange={(e) => setPrefsAnd({ bubbleColor: e.target.value })} /></label>
+                </div>
+                <h3>Цвет ников в группах</h3>
+                <div className="swatches">
+                  <div className={`sw${!prefs.nickColor ? " sel" : ""} sw-auto`} onClick={() => setPrefsAnd({ nickColor: null })}>авто</div>
+                  <label className="sw rainbow" title="Свой цвет ников"><input type="color" value={prefs.nickColor || "#5AABF0"} onChange={(e) => setPrefsAnd({ nickColor: e.target.value })} /></label>
+                </div>
+                <h3>Шрифт</h3>
+                <div className="quick-chips">
+                  {FONTS.map((f) => <button key={f.id} className={`chip${prefs.font === f.id ? " chip-on" : ""}`} style={{ fontFamily: f.css }} onClick={() => setPrefsAnd({ font: f.id })}>{f.name}</button>)}
+                </div>
+                <h3>Иконка приложения</h3>
+                <div className="swatches">
+                  {APP_ICONS.map((ic) => (
+                    <img key={ic.id} src={ic.file} alt={ic.name} title={ic.name} className={`icon-pick${prefs.icon === ic.id ? " sel" : ""}`} onClick={() => setPrefsAnd({ icon: ic.id })} />
+                  ))}
+                </div>
+              </div>
+
+              <div className="sec">
+                <h3>Обои чата</h3>
+                <div className="wp-grid">
+                  {WALLPAPERS.map((w, i) => (
+                    <div key={i} className={`wp${prefs.wallpaper === i ? " sel" : ""}`} style={{ background: w.css || "var(--bg)" }}
+                      onClick={() => setPrefsAnd({ wallpaper: i })}>{w.name}</div>
+                  ))}
+                  <div className={`wp${prefs.wallpaper === "custom" ? " sel" : ""}`}
+                    style={{ backgroundImage: prefs.customWallpaper ? `url(${prefs.customWallpaper})` : undefined, backgroundSize: "cover" }}
+                    onClick={() => wpInp.current?.click()}>Своя 📁</div>
+                </div>
+                <p className="stat">Свою картинку можно кадрировать, GIF ставится как есть.</p>
+                <div className="toggle-row">
+                  <span>🔊 Звук при печати</span>
+                  <button className={`toggle${prefs.typeSound ? " on" : ""}`} onClick={() => setPrefsAnd({ typeSound: !prefs.typeSound })} />
+                </div>
+              </div>
+
+              <div className="sec">
+                <h3>Быстрые ответы (до 5, отправляются в один клик)</h3>
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <input key={i} className="field" style={{ marginBottom: 6, padding: "8px 12px" }} placeholder={`Фраза ${i + 1}`}
+                    defaultValue={prefs.quickReplies?.[i] || ""}
+                    onBlur={(e) => {
+                      const qr = [...(prefs.quickReplies || [])];
+                      qr[i] = e.target.value;
+                      setPrefsAnd({ quickReplies: qr.filter(Boolean).slice(0, 5) });
+                    }} />
+                ))}
+              </div>
+
+              {amAppAdmin && (
+                <div className="sec">
+                  <h3>📢 Админ мессенджера</h3>
+                  <input className="field" placeholder="Текст объявления" maxLength={120} value={annText}
+                    onChange={(e) => setAnnText(e.target.value)} />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="btn" style={{ flex: 1 }} disabled={!annText.trim()}
+                      onClick={async () => {
+                        const ts = new Date().toISOString();
+                        const { error } = await supabase.from("app_settings")
+                          .update({ announcement: annText.trim(), announcement_at: ts }).eq("id", 1);
+                        if (error) notify(`Не удалось: ${error.message}`);
+                        else { setAppSettings((st) => ({ ...st, announcement: annText.trim(), announcement_at: ts })); setAnnText(""); notify("Объявление опубликовано ✓"); }
+                      }}>Опубликовать</button>
+                    <button className="btn ghost" style={{ flex: 1 }}
+                      onClick={async () => {
+                        const { error } = await supabase.from("app_settings").update({ announcement: null }).eq("id", 1);
+                        if (error) notify(`Не удалось: ${error.message}`);
+                        else { setAppSettings((st) => ({ ...st, announcement: null })); notify("Объявление снято"); }
+                      }}>Убрать</button>
+                  </div>
+                  <p className="stat">Объявление видят все; клик по нему открывает главный канал. Назначить главный канал: откройте канал → шапка → «📌 Сделать главным…».</p>
+                </div>
+              )}
+
+              <div className="sec">
+                <h3>Аккаунт</h3>
+                <input className="field" placeholder="Отображаемое имя" maxLength={24} defaultValue={me.login}
+                  onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== me.login) saveProfile({ login: v }); }} />
+                <input className="field" placeholder="Сменить @тег" defaultValue={me.tag}
+                  onBlur={async (e) => {
+                    const t = e.target.value.trim().replace(/^@/, "");
+                    if (!t || t === me.tag) return;
+                    if (!/^[a-zA-Z0-9_]{3,20}$/.test(t)) { notify("Тег: 3–20 символов, латиница, цифры, _"); return; }
+                    const { error } = await supabase.from("profiles").update({ tag: t }).eq("id", me.id);
+                    if (error) { notify(error.code === "23505" ? "Этот тег уже занят." : `Не удалось: ${error.message}`); return; }
+                    const next = { ...me, tag: t }; setMe(next); cacheProfiles([next]); notify("Тег обновлён ✓");
+                  }} />
+                <input className="field" type="password" placeholder="Новый пароль — введите и нажмите Enter"
+                  onKeyDown={async (e) => {
+                    if (e.key !== "Enter") return;
+                    const v = e.target.value;
+                    if (v.length < 6) { notify("Пароль — минимум 6 символов."); return; }
+                    const { error } = await supabase.auth.updateUser({ password: v });
+                    if (error) { notify(`Не удалось сменить пароль: ${error.message}`); return; }
+                    e.target.value = ""; notify("Пароль изменён ✓");
+                  }} />
+                <p className="stat">Имя и @тег меняются сразу. Логин для входа остаётся прежним.</p>
+              </div>
 
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                 <button className="btn ghost" onClick={exportData}>⬇ Экспорт данных</button>
@@ -1655,7 +2080,7 @@ export default function App() {
       {showMember && (
         <div className="overlay" style={{ zIndex: 70 }} onClick={() => setShowMember(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="banner" style={{ background: showMember.banner_color || BANNERS[showMember.banner] || BANNERS[0] }}>
+            <div className="banner" style={bannerCss(showMember)}>
               <Avatar user={showMember} size="lg" />
             </div>
             <div className="modal-pad" style={{ paddingTop: 58 }}>
@@ -1722,8 +2147,62 @@ export default function App() {
         </div>
       )}
 
+      {/* ПРЕДПРОСМОТР ПЕРЕД ОТПРАВКОЙ */}
+      {pendingMedia && (
+        <div className="overlay" style={{ zIndex: 75 }} onClick={() => setPendingMedia(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>Отправить {pendingMedia.kind === "video" ? "видео" : "фото"}{pendingMedia.orig ? " (оригинал)" : ""}?</h3>
+              {pendingMedia.kind === "video"
+                ? <video src={pendingMedia.url} controls style={{ width: "100%", maxHeight: 320, borderRadius: 10 }} />
+                : <img src={pendingMedia.url} alt="" style={{ width: "100%", maxHeight: 320, objectFit: "contain", borderRadius: 10 }} />}
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button className="btn" style={{ flex: 1 }} onClick={confirmSendMedia}>➤ Отправить</button>
+                <button className="btn ghost" style={{ flex: 1 }} onClick={() => setPendingMedia(null)}>Отмена</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ЗВОНОК */}
+      <audio ref={remoteAudioRef} autoPlay />
+      {call && (
+        <div className="call-screen" style={bannerCss(call.peer)}>
+          <div className="call-shade" />
+          {call.video && call.status === "active" && (
+            <video ref={remoteVideoRef} autoPlay playsInline className="call-remote" />
+          )}
+          <div className="call-top">
+            <Avatar user={call.peer} size="lg" />
+            <div className="call-name">{call.peer?.login}</div>
+            <div className="call-status">
+              {call.status === "ringing"
+                ? (call.dir === "in" ? `Входящий ${call.video ? "видео" : "аудио"}звонок…` : "Звоним…")
+                : (() => { const d = Math.floor((Date.now() - call.startedAt) / 1000); return `${String(Math.floor(d / 60)).padStart(2, "0")}:${String(d % 60).padStart(2, "0")}`; })()}
+            </div>
+          </div>
+          {call.video && <video ref={localVideoRef} autoPlay playsInline muted className="call-local" />}
+          <div className="call-btns">
+            {call.status === "active" && (
+              <button className="call-btn" onClick={toggleCallMute}>{callMuted ? "🔇" : "🎙"}</button>
+            )}
+            {call.status === "active" && call.video && (
+              <button className="call-btn" onClick={toggleCallCam}>{callCamOff ? "🚫" : "📷"}</button>
+            )}
+            {call.dir === "in" && call.status === "ringing" && (
+              <button className="call-btn accept" onClick={acceptCall}>📞</button>
+            )}
+            <button className="call-btn hang" onClick={() => endCall(true)}>📵</button>
+          </div>
+        </div>
+      )}
+
       {/* КАДРИРОВАНИЕ АВАТАРА */}
-      {crop && <CropModal src={crop.src} onCancel={() => setCrop(null)} onSave={cropDone} />}
+      {crop && <CropModal src={crop.src}
+        aspect={crop.kind.includes("Banner") ? 4.4 : crop.kind === "wallpaper" ? 0.62 : 1}
+        round={crop.kind === "me" || crop.kind === "group"}
+        onCancel={() => setCrop(null)} onSave={cropDone} />}
 
       {/* ТОСТ */}
       {toast && (
