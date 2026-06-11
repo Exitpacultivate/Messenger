@@ -126,7 +126,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -149,6 +149,10 @@ export default function App() {
   const [folderEdit, setFolderEdit] = useState(null);
   const [folderName, setFolderName] = useState("");
   const [folderIds, setFolderIds] = useState(new Set());
+  const [appSettings, setAppSettings] = useState({});
+  const [annText, setAnnText] = useState("");
+  const [newKind, setNewKind] = useState("group"); // group | channel
+  const [channelResults, setChannelResults] = useState([]);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -195,6 +199,9 @@ export default function App() {
   const myRow = memberRows.find((r) => r.user_id === me?.id);
   const amOwner = isGroup && activeChat?.owner === me?.id;
   const hasRight = (r) => amOwner || (myRow?.role === "admin" && !!myRow?.rights?.[r]);
+  const isChannel = !!activeChat?.is_channel;
+  const amAppAdmin = !!me?.is_app_admin;
+  const canPost = !isChannel || amOwner || myRow?.role === "admin";
 
   function notify(text) {
     setToast(text);
@@ -260,6 +267,9 @@ export default function App() {
     ]);
     setFriends(new Set((fr || []).map((x) => x.friend_id)));
     setBlocked(new Set((bl || []).map((x) => x.blocked_id)));
+
+    const { data: st } = await supabase.from("app_settings").select("*").eq("id", 1).single();
+    if (st) setAppSettings(st);
 
     const pids = new Set();
     cs.forEach((c) => { if (!c.is_group) pids.add(c.u1 === myId ? c.u2 : c.u1); });
@@ -367,6 +377,9 @@ export default function App() {
         } else {
           setMembers((d) => (d[r.chat_id] ? { ...d, [r.chat_id]: d[r.chat_id].filter((m) => m.user_id !== r.user_id) } : d));
         }
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_settings" }, (p) => {
+        if (p.new) setAppSettings(p.new);
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "chat_reads" }, (p) => {
         const r = p.new;
@@ -532,6 +545,44 @@ export default function App() {
   useUserSearch(groupQuery, setGroupResults, (u) => !groupPicks.some((p) => p.id === u.id));
   useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).some((m) => m.user_id === u.id));
 
+  useEffect(() => {
+    if (phase !== "main") return;
+    const q = userQuery.trim().replace(/^@/, "");
+    if (!q) { setChannelResults([]); return; }
+    const t = setTimeout(async () => {
+      const { data } = await supabase.from("chats").select("*").eq("is_channel", true).ilike("title", `%${q}%`).limit(10);
+      setChannelResults(data || []);
+    }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userQuery, phase]);
+
+  async function joinChannel(c) {
+    const already = chats.some((x) => x.id === c.id) && (members[c.id] || []).some((m) => m.user_id === me.id);
+    if (!already) {
+      const { error } = await supabase.from("chat_members").insert({ chat_id: c.id, user_id: me.id });
+      if (error && error.code !== "23505") { notify(`Не удалось подписаться: ${error.message}`); return; }
+      setChats((cs) => (cs.some((x) => x.id === c.id) ? cs : [...cs, c]));
+      const { data: mm } = await supabase.from("chat_members").select("*").eq("chat_id", c.id);
+      setMembers((d) => ({ ...d, [c.id]: (mm || []).map((m) => ({ user_id: m.user_id, role: m.role || "member", rights: m.rights || {} })) }));
+      (mm || []).forEach((m) => ensureProfile(m.user_id));
+      const { data: msgs } = await supabase.from("messages").select("*").eq("chat_id", c.id).order("created_at", { ascending: false }).limit(200);
+      setMessages((d) => ({ ...d, [c.id]: (msgs || []).reverse() }));
+      notify("Вы подписались на канал ✓");
+    }
+    setUserQuery(""); setSearchResults(null); setChannelResults([]);
+    openChat(c.id);
+  }
+  async function openMainChannel() {
+    const id = appSettings.main_channel;
+    if (!id) { notify("Главный канал ещё не назначен."); return; }
+    const local = chats.find((c) => c.id === id);
+    if (local) { openChat(id); return; }
+    const { data: c } = await supabase.from("chats").select("*").eq("id", id).single();
+    if (!c) { notify("Канал недоступен."); return; }
+    await joinChannel(c);
+  }
+
   async function startChat(user) {
     cacheProfiles([user]);
     let chat = chats.find((c) => !c.is_group && (c.u1 === user.id || c.u2 === user.id));
@@ -554,9 +605,9 @@ export default function App() {
   async function createGroup() {
     const title = groupTitle.trim();
     if (!title) { notify("Дайте группе название."); return; }
-    if (!groupPicks.length) { notify("Добавьте хотя бы одного участника."); return; }
+    if (newKind !== "channel" && !groupPicks.length) { notify("Добавьте хотя бы одного участника."); return; }
     const { data: chat, error } = await supabase.from("chats")
-      .insert({ is_group: true, title, u1: me.id, u2: null, owner: me.id }).select().single();
+      .insert({ is_group: true, is_channel: newKind === "channel", title, u1: me.id, u2: null, owner: me.id }).select().single();
     if (error) { console.error(error); notify(`Не удалось создать группу: ${error.message}`); return; }
     const ids = [me.id, ...groupPicks.map((p) => p.id)];
     const { error: e2 } = await supabase.from("chat_members").insert(ids.map((uid) => ({ chat_id: chat.id, user_id: uid })));
@@ -997,6 +1048,13 @@ export default function App() {
           <button className="icon-btn" title="Избранное" onClick={openFavorites}>⭐</button>
           <button className="icon-btn" title="Создать группу" onClick={() => setShowGroupNew(true)}>👥</button>
         </div>
+        {appSettings.announcement && (prefs.dismissedAnn || 0) < new Date(appSettings.announcement_at || 0).getTime() && (
+          <div className="ann-bar" onClick={openMainChannel} title="Открыть главный канал">
+            📢 <span>{appSettings.announcement}</span>
+            <button className="icon-btn" style={{ fontSize: 12, padding: "3px 6px" }}
+              onClick={(e) => { e.stopPropagation(); setPrefsAnd({ dismissedAnn: Date.now() }); }}>✕</button>
+          </div>
+        )}
         <div className="folder-tabs">
           <button className={`ftab${activeFolder === "all" ? " on" : ""}`} onClick={() => setActiveFolder("all")}>Все</button>
           {friends.size > 0 && (
@@ -1011,8 +1069,18 @@ export default function App() {
           <button className="ftab" title="Новая папка" onClick={() => openFolderEditor("new")}>＋</button>
         </div>
         <div className="chats">
-          {searchResults !== null && userQuery.trim() ? (
-            searchResults.length ? searchResults.map((u) => (
+          {(searchResults !== null || channelResults.length > 0) && userQuery.trim() ? (<>
+            {channelResults.map((c) => (
+              <div className="chat-item" key={c.id} onClick={() => joinChannel(c)}>
+                <GroupAvatar chat={c} />
+                <div className="ci-body">
+                  <div className="ci-row"><span className="ci-name">📣 {c.title}</span></div>
+                  <div className="ci-last">Канал{c.description ? ` · ${c.description}` : ""}</div>
+                </div>
+                <span className="badge">Открыть</span>
+              </div>
+            ))}
+            {(searchResults || []).map((u) => (
               <div className="chat-item" key={u.id} onClick={() => startChat(u)}>
                 <Avatar user={u} online={isOn(u)} />
                 <div className="ci-body">
@@ -1021,8 +1089,11 @@ export default function App() {
                 </div>
                 <span className="badge">Написать</span>
               </div>
-            )) : <p className="muted" style={{ padding: 20, textAlign: "center", fontSize: 14 }}>Никого не нашлось. Проверьте @тег.</p>
-          ) : folderChats.length ? (
+            ))}
+            {!channelResults.length && !(searchResults || []).length && (
+              <p className="muted" style={{ padding: 20, textAlign: "center", fontSize: 14 }}>Ничего не нашлось. Проверьте @тег или название канала.</p>
+            )}
+          </>) : folderChats.length ? (
             folderChats.map((c) => {
               const p = c.is_group ? null : profiles[c.u1 === me.id ? c.u2 : c.u1];
               const last = lastMsgOf(c);
@@ -1035,7 +1106,7 @@ export default function App() {
                   {c.is_group ? <GroupAvatar chat={c} /> : c.u1 === c.u2 ? <Avatar user={{ tag: "⭐", frame: "none" }} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
-                      <span className="ci-name">{c.is_group && "👥 "}{chatTitle(c)}{isMuted(c.id) && " 🔕"}</span>
+                      <span className="ci-name">{c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{isMuted(c.id) && " 🔕"}</span>
                       <span className="ci-time">{last ? fmtTime(last.created_at) : ""}</span>
                     </div>
                     <div className="ci-row">
@@ -1073,7 +1144,7 @@ export default function App() {
                 {typingNames.length
                   ? `${typingNames.join(", ")} печатает…`
                   : isGroup
-                    ? `${activeMembers.length} участников${activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}`
+                    ? `${activeMembers.length} ${isChannel ? "подписчиков" : "участников"}${activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}`
                     : activeChat.u1 === activeChat.u2 ? "ваши заметки" : lastSeenText(peer)}
               </div>
             </div>
@@ -1108,7 +1179,7 @@ export default function App() {
               const othersRead = Object.entries(reads[activeId] || {}).some(([uid, t]) => uid !== me.id && t >= ts);
               const url = m.type === "text" ? findUrl(m.content) : null;
               const showAsPhoto = m.type === "photo" || (m.type === "file" && isImg(m));
-              const showSender = isGroup && !out && (!prev || prev.sender_id !== m.sender_id);
+              const showSender = isGroup && !isChannel && !out && (!prev || prev.sender_id !== m.sender_id);
               return (
                 <div key={m.id} ref={(el) => { if (el) msgRefs.current[m.id] = el; }}>
                   {newDay && <div style={{ display: "flex", justifyContent: "center" }}><span className="day-sep">{fmtDay(m.created_at)}</span></div>}
@@ -1153,6 +1224,12 @@ export default function App() {
             {activeMsgs.length === 0 && <div className="placeholder" style={{ minHeight: 200 }}>Напишите первое сообщение</div>}
           </div>
 
+          {isChannel && !canPost ? (
+            <div className="composer" style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center" }}>
+              <span className="muted" style={{ fontSize: 14 }}>📣 Вы подписаны на канал</span>
+              <button className="chip" onClick={() => toggleMute(activeId)}>{isMuted(activeId) ? "🔕 Включить звук" : "🔔 Без звука"}</button>
+            </div>
+          ) : (
           <div className="composer">
             {replyTo && (
               <div className="reply-bar">
@@ -1202,6 +1279,7 @@ export default function App() {
                 onClick={() => recording ? stopVoice(true) : sendText()}>➤</button>
             </div>
           </div>
+          )}
         </>)}
       </div>
 
@@ -1249,7 +1327,12 @@ export default function App() {
         <div className="overlay" onClick={() => setShowGroupNew(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-pad">
-              <h3 style={{ marginTop: 0 }}>Новая группа</h3>
+              <h3 style={{ marginTop: 0 }}>{newKind === "channel" ? "Новый канал" : "Новая группа"}</h3>
+              <div className="theme-row" style={{ marginBottom: 10 }}>
+                <button className={`btn${newKind === "group" ? "" : " ghost"}`} style={{ padding: "8px 4px", fontSize: 13 }} onClick={() => setNewKind("group")}>👥 Группа</button>
+                <button className={`btn${newKind === "channel" ? "" : " ghost"}`} style={{ padding: "8px 4px", fontSize: 13 }} onClick={() => setNewKind("channel")}>📣 Канал</button>
+              </div>
+              {newKind === "channel" && <p className="stat" style={{ marginBottom: 8 }}>Публиковать смогут только вы и админы канала. Подписчики найдут канал по названию через поиск.</p>}
               <input className="field" placeholder="Название группы" maxLength={50} value={groupTitle}
                 onChange={(e) => setGroupTitle(e.target.value)} autoFocus />
               {groupPicks.length > 0 && (
@@ -1272,7 +1355,7 @@ export default function App() {
                 </div>
               ))}
               <button className="btn" style={{ marginTop: 10 }} onClick={createGroup}
-                disabled={!groupTitle.trim() || !groupPicks.length}>Создать группу</button>
+                disabled={!groupTitle.trim() || (newKind !== "channel" && !groupPicks.length)}>{newKind === "channel" ? "Создать канал" : "Создать группу"}</button>
               <button className="btn ghost" onClick={() => setShowGroupNew(false)}>Отмена</button>
             </div>
           </div>
@@ -1374,7 +1457,7 @@ export default function App() {
                 <div className="modal-pad" style={{ paddingTop: 58 }}>
                   <div style={{ fontWeight: 700, fontSize: 19 }}>{activeChat.title}</div>
                   <div className="muted" style={{ fontSize: 14 }}>
-                    {activeMembers.length} участников{activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}
+                    {activeMembers.length} {isChannel ? "подписчиков" : "участников"}{activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}
                   </div>
                   {activeChat.description && <p style={{ marginTop: 8, fontSize: 14.5, lineHeight: 1.4 }}>{activeChat.description}</p>}
 
@@ -1389,6 +1472,16 @@ export default function App() {
                     <button className="ios-btn" onClick={leaveGroup}><span className="ic">🚪</span>Выйти</button>
                   </div>
 
+                  {amAppAdmin && isChannel && (
+                    <button className="btn ghost" style={{ marginBottom: 10 }}
+                      onClick={async () => {
+                        const { error } = await supabase.from("app_settings").update({ main_channel: activeId }).eq("id", 1);
+                        if (error) notify(`Не удалось: ${error.message}`);
+                        else { setAppSettings((st) => ({ ...st, main_channel: activeId })); notify("Назначен главным каналом ✓"); }
+                      }}>
+                      {appSettings.main_channel === activeId ? "⭐ Это главный канал мессенджера" : "📌 Сделать главным каналом мессенджера"}
+                    </button>
+                  )}
                   <div className="ios-list">
                     {[["photo", "🖼", "фото"], ["video", "🎬", "видео"], ["file", "📄", "файлов"], ["audio", "🎧", "аудио"], ["link", "🔗", "ссылок"], ["voice", "🎤", "голосовых"], ["gif", "🪄", "GIF"]].map(([k, ic, label]) => (
                       <button className="ios-row" key={k} onClick={() => setMediaTab(k)}>
@@ -1502,6 +1595,29 @@ export default function App() {
                     setPrefsAnd({ quickReplies: qr.filter(Boolean).slice(0, 5) });
                   }} />
               ))}
+
+              {amAppAdmin && (<>
+                <h3>📢 Админ мессенджера</h3>
+                <input className="field" placeholder="Текст объявления" maxLength={120} value={annText}
+                  onChange={(e) => setAnnText(e.target.value)} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn" style={{ flex: 1 }} disabled={!annText.trim()}
+                    onClick={async () => {
+                      const ts = new Date().toISOString();
+                      const { error } = await supabase.from("app_settings")
+                        .update({ announcement: annText.trim(), announcement_at: ts }).eq("id", 1);
+                      if (error) notify(`Не удалось: ${error.message}`);
+                      else { setAppSettings((st) => ({ ...st, announcement: annText.trim(), announcement_at: ts })); setAnnText(""); notify("Объявление опубликовано ✓"); }
+                    }}>Опубликовать</button>
+                  <button className="btn ghost" style={{ flex: 1 }}
+                    onClick={async () => {
+                      const { error } = await supabase.from("app_settings").update({ announcement: null }).eq("id", 1);
+                      if (error) notify(`Не удалось: ${error.message}`);
+                      else { setAppSettings((st) => ({ ...st, announcement: null })); notify("Объявление снято"); }
+                    }}>Убрать</button>
+                </div>
+                <p className="stat">Объявление видят все пользователи; клик по нему открывает главный канал. Назначить главный канал: откройте свой канал → нажмите на шапку → «📌 Сделать главным каналом».</p>
+              </>)}
 
               <h3>Аккаунт</h3>
               <input className="field" placeholder="Отображаемое имя" maxLength={24} defaultValue={me.login}

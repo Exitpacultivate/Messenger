@@ -223,4 +223,8 @@ mark { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2p
 .crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0,0,0,0.55); pointer-events: none; }
 .bubble.flash { animation: flashHi 1.5s ease; }
 @keyframes flashHi { 0%, 55% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 1px 2px rgba(0,0,0,0.18); } }
+
+.ann-bar { margin: 0 10px 8px; padding: 8px 10px; background: var(--accent-light); border: 1px solid var(--accent);
+  border-radius: 12px; font-size: 13px; display: flex; gap: 8px; align-items: center; cursor: pointer; color: var(--text); }
+.ann-bar span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 `;
