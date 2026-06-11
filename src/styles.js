@@ -270,4 +270,10 @@ mark { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2p
 .d-row:hover { background: var(--hover); }
 .d-row .d-ic { width: 22px; text-align: center; font-size: 17px; opacity: 0.9; }
 .d-row .right { margin-left: auto; }
+
+.call-btn-wrap { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+.call-lbl { color: rgba(255,255,255,0.78); font-size: 12.5px; }
+.call-btn svg { width: 26px; height: 26px; display: block; }
+.call-btn { display: flex; align-items: center; justify-content: center; }
+.call-btn.active-w { background: #fff; color: #1a2233; }
 `;

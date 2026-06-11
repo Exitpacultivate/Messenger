@@ -18,6 +18,13 @@ const APP_ICONS = [
   { id: "mint", name: "Мята", file: "/icon-mint.svg" },
   { id: "dark", name: "Минимал", file: "/icon-dark.svg" },
 ];
+const CallIc = {
+  mic: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>,
+  micOff: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><line x1="4" y1="4" x2="20" y2="20"/></svg>,
+  cam: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="7" width="12" height="10" rx="2"/><path d="M15 10.5 21 7v10l-6-3.5"/></svg>,
+  camOff: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="7" width="12" height="10" rx="2"/><path d="M15 10.5 21 7v10l-6-3.5"/><line x1="3" y1="3" x2="21" y2="21"/></svg>,
+  phone: <svg viewBox="0 0 24 24" fill="currentColor"><path d="M22 16.92v2a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.08 4.18 2 2 0 0 1 4.06 2h2a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L7.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>,
+};
 const blobToB64 = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
 const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
 
@@ -214,6 +221,7 @@ export default function App() {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const sigChans = useRef({});
+  const remoteStreamRef = useRef(null);
   const candQueue = useRef([]);
   const ringRef = useRef(null);
   const callRef = useRef(null);
@@ -479,9 +487,11 @@ export default function App() {
   }, [phase, me?.id]);
   useEffect(() => {
     if (call?.status !== "active") return;
+    attachStreams();
     const t = setInterval(() => setCallTick((x) => x + 1), 1000);
     return () => clearInterval(t);
-  }, [call?.status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [call?.status, call?.video]);
 
   useEffect(() => {
     if (!showContacts) return;
@@ -807,18 +817,42 @@ export default function App() {
     ch.send({ type: "broadcast", event, payload: { from: me.id, ...payload } });
   }
   function newPC(peerId) {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        // Бесплатный публичный TURN (Open Relay, проект Metered) — для сетей со строгим NAT
+        { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+      ],
+    });
     pc.onicecandidate = (e) => { if (e.candidate) signal(peerId, "candidate", { candidate: e.candidate.toJSON() }); };
     pc.ontrack = (e) => {
-      const stream = e.streams[0];
-      if (remoteAudioRef.current) remoteAudioRef.current.srcObject = stream;
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
+      remoteStreamRef.current = e.streams[0];
+      attachStreams();
     };
     pc.onconnectionstatechange = () => {
       if (["failed", "disconnected", "closed"].includes(pc.connectionState)) endCall(false);
     };
     pcRef.current = pc;
     return pc;
+  }
+  function attachStreams() {
+    const rs = remoteStreamRef.current;
+    if (rs) {
+      if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== rs) {
+        remoteAudioRef.current.srcObject = rs;
+      }
+      remoteAudioRef.current?.play?.().catch(() => {});
+      if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== rs) {
+        remoteVideoRef.current.srcObject = rs;
+        remoteVideoRef.current.play?.().catch(() => {});
+      }
+    }
+    const ls = localStreamRef.current;
+    if (ls && localVideoRef.current && localVideoRef.current.srcObject !== ls) {
+      localVideoRef.current.srcObject = ls;
+    }
   }
   function ringStart() {
     try {
@@ -888,6 +922,8 @@ export default function App() {
     pcRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
+    remoteStreamRef.current = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     candQueue.current = [];
     setCall(null);
   }
@@ -2185,15 +2221,27 @@ export default function App() {
           {call.video && <video ref={localVideoRef} autoPlay playsInline muted className="call-local" />}
           <div className="call-btns">
             {call.status === "active" && (
-              <button className="call-btn" onClick={toggleCallMute}>{callMuted ? "🔇" : "🎙"}</button>
+              <div className="call-btn-wrap">
+                <button className={`call-btn${callMuted ? " active-w" : ""}`} onClick={toggleCallMute}>{callMuted ? CallIc.micOff : CallIc.mic}</button>
+                <span className="call-lbl">звук</span>
+              </div>
             )}
             {call.status === "active" && call.video && (
-              <button className="call-btn" onClick={toggleCallCam}>{callCamOff ? "🚫" : "📷"}</button>
+              <div className="call-btn-wrap">
+                <button className={`call-btn${callCamOff ? " active-w" : ""}`} onClick={toggleCallCam}>{callCamOff ? CallIc.camOff : CallIc.cam}</button>
+                <span className="call-lbl">камера</span>
+              </div>
             )}
             {call.dir === "in" && call.status === "ringing" && (
-              <button className="call-btn accept" onClick={acceptCall}>📞</button>
+              <div className="call-btn-wrap">
+                <button className="call-btn accept" onClick={acceptCall}>{CallIc.phone}</button>
+                <span className="call-lbl">ответить</span>
+              </div>
             )}
-            <button className="call-btn hang" onClick={() => endCall(true)}>📵</button>
+            <div className="call-btn-wrap">
+              <button className="call-btn hang" onClick={() => endCall(true)}><span style={{ display: "inline-flex", transform: "rotate(135deg)" }}>{CallIc.phone}</span></button>
+              <span className="call-lbl">завершить</span>
+            </div>
           </div>
         </div>
       )}
