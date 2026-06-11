@@ -15,7 +15,7 @@ function Avatar({ user, size = "", online = false }) {
     <div className="ava-frame" style={{ background: frame.css }}>
       <div className={`ava ${size}`} style={{ background: user?.avatar ? "var(--side)" : color }}>
         {user?.avatar ? <img src={user.avatar} alt="" /> : (user?.tag?.[0] || "?").toUpperCase()}
-        {size === "" && online && <div className="online-dot" />}
+        {size !== "lg" && online && <div className="online-dot" />}
       </div>
     </div>
   );
@@ -56,6 +56,56 @@ function VoiceBubble({ msg }) {
   );
 }
 
+function CropModal({ src, onCancel, onSave }) {
+  const [zoom, setZoom] = useState(1);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [nat, setNat] = useState(null);
+  const drag = useRef(null);
+  const imgEl = useRef(null);
+  const BOX = 240;
+  const base = nat ? Math.max(BOX / nat.w, BOX / nat.h) : 1;
+  const w = nat ? nat.w * base * zoom : BOX;
+  const h = nat ? nat.h * base * zoom : BOX;
+  const clamp = (p) => ({ x: Math.min(0, Math.max(BOX - w, p.x)), y: Math.min(0, Math.max(BOX - h, p.y)) });
+  useEffect(() => { setPos((p) => ({ x: Math.min(0, Math.max(BOX - w, p.x)), y: Math.min(0, Math.max(BOX - h, p.y)) })); }, [w, h]);
+  function down(e) {
+    const t = e.touches ? e.touches[0] : e;
+    drag.current = { sx: t.clientX, sy: t.clientY, px: pos.x, py: pos.y };
+  }
+  function move(e) {
+    if (!drag.current) return;
+    const t = e.touches ? e.touches[0] : e;
+    setPos(clamp({ x: drag.current.px + (t.clientX - drag.current.sx), y: drag.current.py + (t.clientY - drag.current.sy) }));
+  }
+  function up() { drag.current = null; }
+  function save() {
+    const c = document.createElement("canvas");
+    c.width = 512; c.height = 512;
+    const k = 512 / BOX;
+    c.getContext("2d").drawImage(imgEl.current, pos.x * k, pos.y * k, w * k, h * k);
+    c.toBlob((b) => b && onSave(b), "image/jpeg", 0.85);
+  }
+  return (
+    <div className="overlay" style={{ zIndex: 80 }} onClick={onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-pad">
+          <h3 style={{ marginTop: 0 }}>Положение фото</h3>
+          <div className="crop-box" onMouseDown={down} onMouseMove={move} onMouseUp={up} onMouseLeave={up}
+            onTouchStart={down} onTouchMove={move} onTouchEnd={up}>
+            <img ref={imgEl} src={src} alt="" draggable={false}
+              onLoad={(e) => setNat({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
+              style={{ position: "absolute", left: pos.x, top: pos.y, width: w, height: h, maxWidth: "none", userSelect: "none", pointerEvents: "none" }} />
+            <div className="crop-ring" />
+          </div>
+          <input type="range" min={1} max={3} step={0.01} value={zoom} onChange={(e) => setZoom(+e.target.value)} style={{ width: "100%", margin: "12px 0" }} />
+          <button className="btn" onClick={save}>Сохранить</button>
+          <button className="btn ghost" onClick={onCancel}>Отмена</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function highlight(text, q) {
   if (!q) return text;
   const i = text.toLowerCase().indexOf(q.toLowerCase());
@@ -76,7 +126,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -89,6 +139,16 @@ export default function App() {
   const [groupEdit, setGroupEdit] = useState(false);
   const [mediaTab, setMediaTab] = useState(null);
   const [reactFor, setReactFor] = useState(null);
+  const [showMember, setShowMember] = useState(null);
+  const [friends, setFriends] = useState(new Set());
+  const [blocked, setBlocked] = useState(new Set());
+  const [crop, setCrop] = useState(null); // { src, kind: 'me' | 'group' }
+  const [flashId, setFlashId] = useState(null);
+  const [readersFor, setReadersFor] = useState(null);
+  const [activeFolder, setActiveFolder] = useState("all");
+  const [folderEdit, setFolderEdit] = useState(null);
+  const [folderName, setFolderName] = useState("");
+  const [folderIds, setFolderIds] = useState(new Set());
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -115,6 +175,7 @@ export default function App() {
   const chatChannelRef = useRef(null);
   const lpTimer = useRef(null);
   const originalRef = useRef(false);
+  const msgRefs = useRef({});
   const activeIdRef = useRef(null);
   activeIdRef.current = activeId;
 
@@ -192,6 +253,13 @@ export default function App() {
       (allMem || []).forEach((m) => { (membersMap[m.chat_id] ||= []).push({ user_id: m.user_id, role: m.role || "member", rights: m.rights || {} }); });
     }
     setMembers(membersMap);
+
+    const [{ data: fr }, { data: bl }] = await Promise.all([
+      supabase.from("friends").select("friend_id").eq("user_id", myId),
+      supabase.from("blocks").select("blocked_id").eq("user_id", myId),
+    ]);
+    setFriends(new Set((fr || []).map((x) => x.friend_id)));
+    setBlocked(new Set((bl || []).map((x) => x.blocked_id)));
 
     const pids = new Set();
     cs.forEach((c) => { if (!c.is_group) pids.add(c.u1 === myId ? c.u2 : c.u1); });
@@ -532,6 +600,79 @@ export default function App() {
     notify("Сохранено ✓");
   }
 
+  async function toggleFriend(u) {
+    const isFr = friends.has(u.id);
+    const { error } = isFr
+      ? await supabase.from("friends").delete().eq("user_id", me.id).eq("friend_id", u.id)
+      : await supabase.from("friends").insert({ user_id: me.id, friend_id: u.id });
+    if (error) { notify(`Не получилось: ${error.message}`); return; }
+    setFriends((st) => { const n = new Set(st); isFr ? n.delete(u.id) : n.add(u.id); return n; });
+    notify(isFr ? "Удалён из друзей" : "Добавлен в друзья ✓");
+  }
+  async function toggleBlock(u) {
+    const isBl = blocked.has(u.id);
+    const { error } = isBl
+      ? await supabase.from("blocks").delete().eq("user_id", me.id).eq("blocked_id", u.id)
+      : await supabase.from("blocks").insert({ user_id: me.id, blocked_id: u.id });
+    if (error) { notify(`Не получилось: ${error.message}`); return; }
+    setBlocked((st) => { const n = new Set(st); isBl ? n.delete(u.id) : n.add(u.id); return n; });
+    notify(isBl ? "Разблокирован" : "Пользователь заблокирован 🚫");
+  }
+  async function openFavorites() {
+    let fav = chats.find((c) => !c.is_group && c.u1 === me.id && c.u2 === me.id);
+    if (!fav) {
+      const { data, error } = await supabase.from("chats").insert({ u1: me.id, u2: me.id }).select().single();
+      if (error) { notify(`Не удалось открыть Избранное: ${error.message}`); return; }
+      fav = data;
+      setChats((cs) => (cs.some((x) => x.id === fav.id) ? cs : [...cs, fav]));
+    }
+    openChat(fav.id);
+  }
+  function openFolderEditor(f) {
+    setFolderName(f === "new" ? "" : f.name);
+    setFolderIds(new Set(f === "new" ? [] : f.chatIds));
+    setFolderEdit(f);
+  }
+  function saveFolder() {
+    const name = folderName.trim();
+    if (!name) { notify("Дайте папке название."); return; }
+    let folders = [...(prefs.folders || [])];
+    if (folderEdit === "new") {
+      const f = { id: "f" + Date.now().toString(36), name, chatIds: [...folderIds] };
+      folders.push(f);
+      setActiveFolder(f.id);
+    } else {
+      folders = folders.map((x) => (x.id === folderEdit.id ? { ...x, name, chatIds: [...folderIds] } : x));
+    }
+    setPrefsAnd({ folders });
+    setFolderEdit(null);
+  }
+  function deleteFolder() {
+    setPrefsAnd({ folders: (prefs.folders || []).filter((x) => x.id !== folderEdit.id) });
+    setActiveFolder("all");
+    setFolderEdit(null);
+  }
+  function scrollToMsg(id) {
+    const el = msgRefs.current[id];
+    if (!el) { notify("Сообщение не загружено."); return; }
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlashId(id);
+    setTimeout(() => setFlashId(null), 1600);
+  }
+  async function cropDone(blob) {
+    const kind = crop?.kind;
+    setCrop(null);
+    try {
+      if (kind === "me") {
+        const b64 = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+        await saveProfile({ avatar: b64 });
+      } else {
+        const url = await uploadMedia(blob, "jpg", "image/jpeg");
+        await saveGroup({ avatar: url });
+      }
+    } catch { notify("Не удалось сохранить аватар."); }
+  }
+
   function openChat(id) {
     if (activeId) setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: draft } });
     setActiveId(id);
@@ -553,7 +694,10 @@ export default function App() {
     };
     setReplyTo(null);
     const { error } = await supabase.from("messages").insert(row);
-    if (error) notify(error.message.includes("too large") ? "Файл слишком большой." : "Не удалось отправить, проверьте интернет.");
+    if (error) notify(
+      error.message.includes("row-level security") ? "Сообщение не отправлено: пользователь ограничил переписку с вами."
+      : error.message.includes("too large") ? "Файл слишком большой."
+      : "Не удалось отправить, проверьте интернет.");
   }
   function sendText(text) {
     const t = (text ?? draft).trim();
@@ -731,7 +875,7 @@ export default function App() {
     if (d < 86400000) return "был(а) сегодня";
     return `был(а) ${new Date(u.last_seen).toLocaleDateString("ru-RU")}`;
   };
-  const chatTitle = (c) => c.is_group ? (c.title || "Группа") : (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…");
+  const chatTitle = (c) => c.is_group ? (c.title || "Группа") : (c.u1 === c.u2 ? "Избранное" : (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…"));
 
   const themeVars = {
     "--accent": prefs.accent,
@@ -745,6 +889,14 @@ export default function App() {
     return lb - la;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [chats, messages]);
+
+  const folderChats = useMemo(() => {
+    if (activeFolder === "all") return sortedChats;
+    if (activeFolder === "__friends") return sortedChats.filter((c) => !c.is_group && c.u1 !== c.u2 && friends.has(c.u1 === me?.id ? c.u2 : c.u1));
+    const f = (prefs.folders || []).find((x) => x.id === activeFolder);
+    return f ? sortedChats.filter((c) => f.chatIds.includes(c.id)) : sortedChats;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortedChats, activeFolder, friends, prefs.folders, me?.id]);
 
   // ============ РЕНДЕР ============
   if (phase === "config") {
@@ -816,11 +968,9 @@ export default function App() {
       onClick={() => { menu && setMenu(null); showAttach && setShowAttach(false); }}>
       <style>{css}</style>
 
-      <input ref={avatarInp} type="file" accept="image/*" hidden onChange={async (e) => {
+      <input ref={avatarInp} type="file" accept="image/*" hidden onChange={(e) => {
         const f = e.target.files[0]; e.target.value = "";
-        if (!f) return;
-        try { await saveProfile({ avatar: await resizeImage(f, 128, 0.8) }); }
-        catch { notify("Не удалось обработать изображение."); }
+        if (f) setCrop({ src: URL.createObjectURL(f), kind: "me" });
       }} />
       <input ref={mediaInp} type="file" accept="image/*,video/*" hidden onChange={(e) => { handleMedia(e.target.files[0]); e.target.value = ""; }} />
       <input ref={fileInp} type="file" hidden onChange={(e) => { handleFile(e.target.files[0]); e.target.value = ""; }} />
@@ -833,13 +983,9 @@ export default function App() {
         } catch { notify("Не удалось обработать изображение."); }
       }} />
 
-      <input ref={groupAvaInp} type="file" accept="image/*" hidden onChange={async (e) => {
+      <input ref={groupAvaInp} type="file" accept="image/*" hidden onChange={(e) => {
         const f = e.target.files[0]; e.target.value = "";
-        if (!f) return;
-        try {
-          const url = await uploadMedia(await resizeToBlob(f, 256, 0.85), "jpg", "image/jpeg");
-          await saveGroup({ avatar: url });
-        } catch { notify("Не удалось обработать изображение."); }
+        if (f) setCrop({ src: URL.createObjectURL(f), kind: "group" });
       }} />
 
       {/* ЛЕВАЯ ПАНЕЛЬ */}
@@ -848,7 +994,21 @@ export default function App() {
           <button className="icon-btn" title="Профиль и настройки" onClick={() => setShowProfile(true)}>☰</button>
           <input className="search-input" placeholder="Найти по @тегу…" value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)} />
+          <button className="icon-btn" title="Избранное" onClick={openFavorites}>⭐</button>
           <button className="icon-btn" title="Создать группу" onClick={() => setShowGroupNew(true)}>👥</button>
+        </div>
+        <div className="folder-tabs">
+          <button className={`ftab${activeFolder === "all" ? " on" : ""}`} onClick={() => setActiveFolder("all")}>Все</button>
+          {friends.size > 0 && (
+            <button className={`ftab${activeFolder === "__friends" ? " on" : ""}`} onClick={() => setActiveFolder("__friends")}>Друзья</button>
+          )}
+          {(prefs.folders || []).map((f) => (
+            <button key={f.id} className={`ftab${activeFolder === f.id ? " on" : ""}`}
+              onClick={() => (activeFolder === f.id ? openFolderEditor(f) : setActiveFolder(f.id))}>
+              {f.name}{activeFolder === f.id ? " ✏️" : ""}
+            </button>
+          ))}
+          <button className="ftab" title="Новая папка" onClick={() => openFolderEditor("new")}>＋</button>
         </div>
         <div className="chats">
           {searchResults !== null && userQuery.trim() ? (
@@ -862,8 +1022,8 @@ export default function App() {
                 <span className="badge">Написать</span>
               </div>
             )) : <p className="muted" style={{ padding: 20, textAlign: "center", fontSize: 14 }}>Никого не нашлось. Проверьте @тег.</p>
-          ) : sortedChats.length ? (
-            sortedChats.map((c) => {
+          ) : folderChats.length ? (
+            folderChats.map((c) => {
               const p = c.is_group ? null : profiles[c.u1 === me.id ? c.u2 : c.u1];
               const last = lastMsgOf(c);
               const n = unreadCount(c);
@@ -872,7 +1032,7 @@ export default function App() {
                 : c.is_group ? "Группа создана" : "Чат создан";
               return (
                 <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id} onClick={() => openChat(c.id)}>
-                  {c.is_group ? <GroupAvatar chat={c} /> : <Avatar user={p} online={isOn(p)} />}
+                  {c.is_group ? <GroupAvatar chat={c} /> : c.u1 === c.u2 ? <Avatar user={{ tag: "⭐", frame: "none" }} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
                       <span className="ci-name">{c.is_group && "👥 "}{chatTitle(c)}{isMuted(c.id) && " 🔕"}</span>
@@ -914,7 +1074,7 @@ export default function App() {
                   ? `${typingNames.join(", ")} печатает…`
                   : isGroup
                     ? `${activeMembers.length} участников${activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}`
-                    : lastSeenText(peer)}
+                    : activeChat.u1 === activeChat.u2 ? "ваши заметки" : lastSeenText(peer)}
               </div>
             </div>
             <button className="icon-btn" title="Поиск по чату" onClick={() => setChatSearch(chatSearch === null ? "" : null)}>🔍</button>
@@ -930,11 +1090,15 @@ export default function App() {
           {activeChat.pinned_msg && (() => {
             const pm = activeMsgs.find((m) => m.id === activeChat.pinned_msg);
             return pm ? (
-              <div className="pin-bar">📌 <span><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
+              <div className="pin-bar">📌 <span onClick={() => scrollToMsg(pm.id)} style={{ cursor: "pointer" }} title="Перейти к сообщению"><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
                 <button className="icon-btn" style={{ fontSize: 13 }} onClick={() => pinMsg(pm)}>✕</button></div>
             ) : null;
           })()}
 
+          {!isGroup && peer && peer.id !== me.id && blocked.has(peer.id) && (
+            <div className="pin-bar" style={{ borderLeftColor: "#D9534F" }}>🚫 <span>Вы заблокировали этого пользователя — он не сможет вам написать.</span>
+              <button className="chip" onClick={() => toggleBlock(peer)}>Разблокировать</button></div>
+          )}
           <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={{ background: wpCss || undefined }}>
             {(chatSearch ? activeMsgs.filter((m) => m.type === "text" && m.content.toLowerCase().includes(chatSearch.toLowerCase())) : activeMsgs).map((m, i, arr) => {
               const prev = arr[i - 1];
@@ -946,10 +1110,10 @@ export default function App() {
               const showAsPhoto = m.type === "photo" || (m.type === "file" && isImg(m));
               const showSender = isGroup && !out && (!prev || prev.sender_id !== m.sender_id);
               return (
-                <div key={m.id}>
+                <div key={m.id} ref={(el) => { if (el) msgRefs.current[m.id] = el; }}>
                   {newDay && <div style={{ display: "flex", justifyContent: "center" }}><span className="day-sep">{fmtDay(m.created_at)}</span></div>}
                   <div className={`bubble-row ${out ? "out" : "in"}`}>
-                    <div className={`bubble ${out ? "out" : "in"}`}
+                    <div className={`bubble ${out ? "out" : "in"}${flashId === m.id ? " flash" : ""}`}
                       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openMenuAt(e.clientX, e.clientY, m); }}
                       onDoubleClick={() => toggleReaction(m, "❤️")}
                       onTouchStart={(e) => bubbleTouchStart(e, m)}
@@ -1051,6 +1215,7 @@ export default function App() {
           <button onClick={() => { setReplyTo(menu.msg); setMenu(null); taRef.current?.focus(); }}>↩ Ответить</button>
           {menu.msg.type === "text" && <button onClick={() => { navigator.clipboard?.writeText(menu.msg.content); setMenu(null); }}>📋 Копировать</button>}
           <button onClick={() => pinMsg(menu.msg)}>📌 {activeChat?.pinned_msg === menu.msg.id ? "Открепить" : "Закрепить"}</button>
+          {menu.msg.sender_id === me.id && isGroup && <button onClick={() => { const m = menu.msg; setMenu(null); setReadersFor(m); }}>👁 Кто прочитал</button>}
           {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
         </div>
       )}
@@ -1235,9 +1400,11 @@ export default function App() {
 
                   <h3>Участники</h3>
                   {activeMembers.map((u) => (
-                    <div className="member-row" key={u.id}>
+                    <div className="member-row" key={u.id} style={{ cursor: u.id === me.id ? "default" : "pointer" }}
+                      onClick={() => u.id !== me.id && setShowMember(u)}>
                       <Avatar user={u} size="sm" online={isOn(u)} />
                       <span className="mr-name">{u.login} {u.id === activeChat.owner ? "👑" : u._role === "admin" ? "⭐" : ""} {u.id === me.id && <span className="muted">(вы)</span>}</span>
+                      <span style={{ fontSize: 12.5, color: isOn(u) ? "var(--accent)" : "var(--muted)" }}>{isOn(u) ? "онлайн" : ""}</span>
                     </div>
                   ))}
                   <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowChatInfo(false)}>Закрыть</button>
@@ -1252,6 +1419,12 @@ export default function App() {
                 <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
                 {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
                 <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
+                {peer.id !== me.id && (
+                  <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                    <button className="btn ghost" style={{ flex: 1 }} onClick={() => toggleFriend(peer)}>{friends.has(peer.id) ? "✓ В друзьях" : "➕ В друзья"}</button>
+                    <button className="btn ghost" style={{ flex: 1, color: "#D9534F" }} onClick={() => toggleBlock(peer)}>{blocked.has(peer.id) ? "Разблокировать" : "🚫 Заблокировать"}</button>
+                  </div>
+                )}
                 <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowChatInfo(false)}>Закрыть</button>
               </div>
             </>) : null}
@@ -1330,6 +1503,29 @@ export default function App() {
                   }} />
               ))}
 
+              <h3>Аккаунт</h3>
+              <input className="field" placeholder="Отображаемое имя" maxLength={24} defaultValue={me.login}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== me.login) saveProfile({ login: v }); }} />
+              <input className="field" placeholder="Сменить @тег" defaultValue={me.tag}
+                onBlur={async (e) => {
+                  const t = e.target.value.trim().replace(/^@/, "");
+                  if (!t || t === me.tag) return;
+                  if (!/^[a-zA-Z0-9_]{3,20}$/.test(t)) { notify("Тег: 3–20 символов, латиница, цифры, _"); return; }
+                  const { error } = await supabase.from("profiles").update({ tag: t }).eq("id", me.id);
+                  if (error) { notify(error.code === "23505" ? "Этот тег уже занят." : `Не удалось: ${error.message}`); return; }
+                  const next = { ...me, tag: t }; setMe(next); cacheProfiles([next]); notify("Тег обновлён ✓");
+                }} />
+              <input className="field" type="password" placeholder="Новый пароль — введите и нажмите Enter"
+                onKeyDown={async (e) => {
+                  if (e.key !== "Enter") return;
+                  const v = e.target.value;
+                  if (v.length < 6) { notify("Пароль — минимум 6 символов."); return; }
+                  const { error } = await supabase.auth.updateUser({ password: v });
+                  if (error) { notify(`Не удалось сменить пароль: ${error.message}`); return; }
+                  e.target.value = ""; notify("Пароль изменён ✓");
+                }} />
+              <p className="stat">Имя и @тег меняются сразу. Логин для входа остаётся прежним.</p>
+
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                 <button className="btn ghost" onClick={exportData}>⬇ Экспорт данных</button>
                 <button className="btn" style={{ background: "#D9534F" }} onClick={logout}>Выйти</button>
@@ -1338,6 +1534,80 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ПРОФИЛЬ УЧАСТНИКА ГРУППЫ */}
+      {showMember && (
+        <div className="overlay" style={{ zIndex: 70 }} onClick={() => setShowMember(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="banner" style={{ background: showMember.banner_color || BANNERS[showMember.banner] || BANNERS[0] }}>
+              <Avatar user={showMember} size="lg" />
+            </div>
+            <div className="modal-pad" style={{ paddingTop: 58 }}>
+              <div style={{ fontWeight: 700, fontSize: 19 }}>{showMember.login}</div>
+              <div className="muted" style={{ fontSize: 14 }}>@{showMember.tag} · {lastSeenText(showMember)}</div>
+              {showMember.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{showMember.bio}</p>}
+              <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                <button className="btn" style={{ flex: 1 }} onClick={() => { const u = showMember; setShowMember(null); setShowChatInfo(false); startChat(u); }}>✉️ Написать</button>
+                <button className="btn ghost" style={{ flex: 1 }} onClick={() => toggleFriend(showMember)}>
+                  {friends.has(showMember.id) ? "✓ В друзьях" : "➕ В друзья"}
+                </button>
+              </div>
+              <button className="btn ghost" style={{ marginTop: 8, color: "#D9534F" }} onClick={() => toggleBlock(showMember)}>
+                {blocked.has(showMember.id) ? "Разблокировать" : "🚫 Заблокировать"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* КТО ПРОЧИТАЛ */}
+      {readersFor && (
+        <div className="overlay" style={{ zIndex: 70 }} onClick={() => setReadersFor(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>👁 Кто прочитал</h3>
+              {activeMembers.filter((u) => u.id !== me.id).map((u) => {
+                const ok = (reads[activeId]?.[u.id] || 0) >= new Date(readersFor.created_at).getTime();
+                return (
+                  <div className="member-row" key={u.id}>
+                    <Avatar user={u} size="sm" online={isOn(u)} />
+                    <span className="mr-name">{u.login}</span>
+                    <span style={{ fontSize: 13, color: ok ? "var(--accent)" : "var(--muted)" }}>{ok ? "✓✓ прочитано" : "—"}</span>
+                  </div>
+                );
+              })}
+              <button className="btn ghost" onClick={() => setReadersFor(null)}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ПАПКИ */}
+      {folderEdit && (
+        <div className="overlay" onClick={() => setFolderEdit(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>{folderEdit === "new" ? "Новая папка" : "Папка"}</h3>
+              <input className="field" placeholder="Название папки" maxLength={20} autoFocus
+                value={folderName} onChange={(e) => setFolderName(e.target.value)} />
+              <h3>Чаты в папке</h3>
+              {sortedChats.map((c) => (
+                <label className="member-row" key={c.id} style={{ cursor: "pointer" }}>
+                  <input type="checkbox" checked={folderIds.has(c.id)}
+                    onChange={(e) => setFolderIds((st) => { const n = new Set(st); e.target.checked ? n.add(c.id) : n.delete(c.id); return n; })} />
+                  <span className="mr-name">{c.is_group ? "👥 " : ""}{chatTitle(c)}</span>
+                </label>
+              ))}
+              <button className="btn" style={{ marginTop: 10 }} onClick={saveFolder}>Сохранить</button>
+              {folderEdit !== "new" && <button className="btn" style={{ background: "#D9534F", marginTop: 8 }} onClick={deleteFolder}>Удалить папку</button>}
+              <button className="btn ghost" onClick={() => setFolderEdit(null)}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* КАДРИРОВАНИЕ АВАТАРА */}
+      {crop && <CropModal src={crop.src} onCancel={() => setCrop(null)} onSave={cropDone} />}
 
       {/* ТОСТ */}
       {toast && (

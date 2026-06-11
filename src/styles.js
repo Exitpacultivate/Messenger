@@ -211,4 +211,16 @@ mark { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2p
   margin: 0 0 8px 48px; }
 .sw.rainbow { background: conic-gradient(red,#ff0,#0f0,#0ff,#00f,#f0f,red); position: relative; overflow: hidden; display: inline-block; }
 .sw.rainbow input { opacity: 0; position: absolute; inset: 0; cursor: pointer; }
+
+.folder-tabs { display: flex; gap: 4px; padding: 0 10px 8px; overflow-x: auto; scrollbar-width: none; }
+.folder-tabs::-webkit-scrollbar { display: none; }
+.ftab { background: none; border: none; color: var(--muted); font-size: 13.5px; font-weight: 500;
+  padding: 5px 11px; border-radius: 14px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+.ftab.on { background: var(--accent); color: #fff; }
+.crop-box { width: 240px; height: 240px; margin: 0 auto; position: relative; overflow: hidden;
+  border-radius: 12px; background: #000; touch-action: none; cursor: grab; }
+.crop-box:active { cursor: grabbing; }
+.crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0,0,0,0.55); pointer-events: none; }
+.bubble.flash { animation: flashHi 1.5s ease; }
+@keyframes flashHi { 0%, 55% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 1px 2px rgba(0,0,0,0.18); } }
 `;
