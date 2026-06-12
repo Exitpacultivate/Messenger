@@ -321,4 +321,12 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
 .bld-anims .chip { font-size: 11.5px; padding: 3px 8px; }
 .call-warn { position: relative; margin-top: 10px; background: rgba(217, 83, 79, 0.25); border: 1px solid #d9534f;
   color: #fff; border-radius: 10px; padding: 8px 12px; font-size: 12.5px; text-align: center; max-width: 320px; }
+
+.sw-pick { background: transparent; border: 2px solid var(--line); display: flex; align-items: center; justify-content: center; }
+.pick-plus { color: var(--muted); font-size: 15px; line-height: 1; pointer-events: none; }
+.bar-col i { font-size: 9.5px; font-style: normal; color: var(--text); opacity: 0.85; }
+.jump-down { position: absolute; right: 14px; bottom: 84px; width: 44px; height: 44px; border-radius: 50%;
+  background: var(--side); border: 1px solid var(--line); color: var(--accent); font-size: 22px;
+  cursor: pointer; z-index: 6; box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+.main { position: relative; }
 `;

@@ -91,8 +91,9 @@ function ColorDot({ value, fallback = "#5AABF0", title, onCommit }) {
   const tRef = useRef(null);
   useEffect(() => { if (value) setV(value); }, [value]);
   return (
-    <label className={`sw${value ? "" : " rainbow"}`} title={title}
-      style={{ position: "relative", overflow: "hidden", display: "inline-block", ...(value ? { background: v } : {}) }}>
+    <label className={`sw${value ? "" : " sw-pick"}`} title={title}
+      style={{ position: "relative", overflow: "hidden", ...(value ? { background: v } : {}) }}>
+      {!value && <span className="pick-plus">＋</span>}
       <input type="color" value={v} style={{ opacity: 0, position: "absolute", inset: 0, cursor: "pointer" }}
         onChange={(e) => {
           const nv = e.target.value;
@@ -164,6 +165,7 @@ function Bars({ data, lk, vk }) {
     <div className="bars">
       {data.map((d, i) => (
         <div className="bar-col" key={i} title={`${d[lk]}: ${d[vk]}`}>
+          <i>{d[vk]}</i>
           <div className="bar" style={{ height: `${Math.round((d[vk] / max) * 58) + 3}px` }} />
           <span>{d[lk]}</span>
         </div>
@@ -256,6 +258,12 @@ export default function App() {
   const [statResults, setStatResults] = useState(null);
   const [showBuilder, setShowBuilder] = useState(false);
   const [builderEmoji, setBuilderEmoji] = useState(null);
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminQuery, setAdminQuery] = useState("");
+  const [adminResults, setAdminResults] = useState(null);
+  const [adminTarget, setAdminTarget] = useState(null);
+  const [adminChats, setAdminChats] = useState([]);
+  const [showJump, setShowJump] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -472,6 +480,7 @@ export default function App() {
       if (!session) { setPhase("auth"); return; }
       const { data: prof } = await supabase.from("profiles").select("*").eq("id", session.user.id).single();
       if (!prof) { setPhase("register"); setRegStep(2); return; }
+      if (prof.restrictions?.banned) { setPhase("banned"); return; }
       setMe(prof);
       cacheProfiles([prof]);
       await loadEverything(prof);
@@ -695,8 +704,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, activeMsgs.length, me?.id]);
 
+  const prevChatRef = useRef(null);
   useEffect(() => {
-    if (msgsRef.current) msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
+    const el = msgsRef.current;
+    if (!el) return;
+    const changed = prevChatRef.current !== activeId;
+    prevChatRef.current = activeId;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 700;
+    const last = activeMsgs[activeMsgs.length - 1];
+    if (changed || near || last?.sender_id === me?.id) el.scrollTop = el.scrollHeight;
+    if (changed) setShowJump(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeMsgs.length, activeId]);
 
   // Esc — закрыть окно или выйти из чата; свайп в сторону — выйти из чата (мобильные)
@@ -709,7 +727,8 @@ export default function App() {
       else if (statusPick) setStatusPick(false);
       else if (builderEmoji) setBuilderEmoji(null);
       else if (showBuilder) setShowBuilder(false);
-      else if (showStats) { if (statUser) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }
+      else if (showStats) { if (statUser && amAppAdmin) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }
+      else if (showAdmin) { if (adminTarget) setAdminTarget(null); else setShowAdmin(false); }
       else if (showContacts) setShowContacts(false);
       else if (showCalls) setShowCalls(false);
       else if (showMenu) setShowMenu(false);
@@ -723,7 +742,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -752,6 +771,7 @@ export default function App() {
     if (error) { setErr("Неверный логин или пароль."); return; }
     const { data: prof } = await supabase.from("profiles").select("*").eq("id", data.user.id).single();
     if (!prof) { setPhase("register"); setRegStep(2); return; }
+    if (prof.restrictions?.banned) { setPhase("banned"); return; }
     setMe(prof); cacheProfiles([prof]);
     await loadEverything(prof);
     setPhase("main"); setPass("");
@@ -815,6 +835,7 @@ export default function App() {
   useUserSearch(groupQuery, setGroupResults, (u) => !groupPicks.some((p) => p.id === u.id));
   useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).some((m) => m.user_id === u.id));
   useUserSearch(statQuery, setStatResults);
+  useUserSearch(adminQuery, setAdminResults);
 
   useEffect(() => {
     if (phase !== "main") return;
@@ -1053,6 +1074,7 @@ export default function App() {
     const to = target || peer;
     if (call) { notify("Звонок уже идёт."); return; }
     if (!to || to.id === me.id) return;
+    if (me.restrictions?.no_calls || me.restrictions?.banned) { notify("Звонки ограничены администратором."); return; }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: withVideo });
       localStreamRef.current = stream;
@@ -1120,15 +1142,62 @@ export default function App() {
 
   async function loadStats() {
     setShowMenu(false); setShowStats(true); setStatUser(null); setStatUserData(null); setStats(null);
-    const { data, error } = await supabase.rpc("admin_stats");
-    if (error || !data) { notify("Статистика недоступна: выполните миграцию v10 в Supabase."); return; }
-    setStats(data);
+    if (amAppAdmin) {
+      const { data, error } = await supabase.rpc("admin_stats");
+      if (error || !data) { notify("Статистика недоступна: выполните миграцию v10 в Supabase."); return; }
+      setStats(data);
+    } else {
+      const { data, error } = await supabase.rpc("my_stats");
+      if (error || !data) { notify("Статистика недоступна: выполните миграцию v11 в Supabase."); return; }
+      setStatUser(me);
+      setStatUserData(data);
+    }
   }
   async function loadUserStats(u) {
     setStatUser(u); setStatUserData(null); setStatQuery(""); setStatResults(null);
     const { data, error } = await supabase.rpc("admin_user_stats", { uid: u.id });
     if (error || !data) { notify("Не удалось загрузить статистику пользователя."); return; }
     setStatUserData(data);
+  }
+  async function openFeedback() {
+    setShowMenu(false);
+    if (amAppAdmin) { notify("Отзывы приходят вам в общий список с пометкой 📮"); return; }
+    let fb = chats.find((c) => c.is_feedback && !c.is_group && (c.u1 === me.id || c.u2 === me.id));
+    if (!fb) {
+      let admin = Object.values(profiles).find((x) => x.is_app_admin);
+      if (!admin) {
+        const { data } = await supabase.from("profiles").select("*").eq("is_app_admin", true).limit(1).maybeSingle();
+        admin = data; if (admin) cacheProfiles([admin]);
+      }
+      if (!admin) { notify("Администратор пока не назначен."); return; }
+      const { data, error } = await supabase.from("chats").insert({ u1: me.id, u2: admin.id, is_feedback: true }).select().single();
+      if (error) { notify(`Не удалось открыть: ${error.message}`); return; }
+      fb = data;
+      setChats((cs) => (cs.some((x) => x.id === fb.id) ? cs : [...cs, fb]));
+    }
+    openChat(fb.id);
+  }
+  async function openAdmin() {
+    setShowMenu(false); setShowAdmin(true); setAdminTarget(null); setAdminQuery(""); setAdminResults(null);
+    const { data } = await supabase.rpc("admin_list_chats");
+    setAdminChats(data || []);
+  }
+  async function setRestriction(u, key, val) {
+    const r = { ...(u.restrictions || {}) };
+    if (val) r[key] = true; else delete r[key];
+    const { error } = await supabase.rpc("admin_set_restrictions", { uid: u.id, r });
+    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    const next = { ...u, restrictions: r };
+    cacheProfiles([next]);
+    setAdminTarget(next);
+  }
+  async function adminDeleteChat(c) {
+    if (!window.confirm(`Удалить «${c.title}» безвозвратно вместе со всеми сообщениями?`)) return;
+    const { error } = await supabase.rpc("admin_delete_chat", { cid: c.id });
+    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    setAdminChats((l) => l.filter((x) => x.id !== c.id));
+    setChats((cs) => cs.filter((x) => x.id !== c.id));
+    notify("Удалено");
   }
   function openFolderEditor(f) {
     setFolderName(f === "new" ? "" : f.name);
@@ -1198,7 +1267,7 @@ export default function App() {
     setReplyTo(null);
     const { error } = await supabase.from("messages").insert(row);
     if (error) notify(
-      error.message.includes("row-level security") ? "Сообщение не отправлено: пользователь ограничил переписку с вами."
+      error.message.includes("row-level security") ? "Сообщение не отправлено: переписка ограничена (блокировка или ограничение администратора)."
       : error.message.includes("too large") ? "Файл слишком большой."
       : "Не удалось отправить, проверьте интернет.");
   }
@@ -1403,7 +1472,10 @@ export default function App() {
     if (d < 86400000) return "был(а) сегодня";
     return `был(а) ${new Date(u.last_seen).toLocaleDateString("ru-RU")}`;
   };
-  const chatTitle = (c) => c.is_group ? (c.title || "Группа") : (c.u1 === c.u2 ? "Избранное" : (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…"));
+  const chatTitle = (c) => {
+    if (c.is_feedback) return amAppAdmin ? (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…") : "Обратная связь";
+    return c.is_group ? (c.title || "Группа") : (c.u1 === c.u2 ? "Избранное" : (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…"));
+  };
 
   const themeVars = {
     "--accent": prefs.accent,
@@ -1440,7 +1512,7 @@ export default function App() {
     ? { backgroundImage: `url(${o.banner_img})`, backgroundSize: "cover", backgroundPosition: "center" }
     : { background: o?.banner_color || BANNERS[o?.banner] || BANNERS[0] };
   const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
-  const sortedChats = useMemo(() => [...chats].sort((a, b) => {
+  const sortedChats = useMemo(() => chats.filter((c) => !c.is_feedback || amAppAdmin).sort((a, b) => {
     const pa = (prefs.pinned || []).includes(a.id) ? 1 : 0;
     const pb = (prefs.pinned || []).includes(b.id) ? 1 : 0;
     if (pa !== pb) return pb - pa;
@@ -1448,7 +1520,7 @@ export default function App() {
     const lb = lastMsgOf(b) ? new Date(lastMsgOf(b).created_at).getTime() : new Date(b.created_at).getTime();
     return lb - la;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [chats, messages, prefs.pinned]);
+  }), [chats, messages, prefs.pinned, amAppAdmin]);
 
   const folderChats = useMemo(() => {
     const arch = prefs.archived || [];
@@ -1478,6 +1550,18 @@ export default function App() {
       <div className="tg" data-theme={prefs.theme} style={{ ...themeVars, display: "block" }}>
         <style>{css}</style>
         <div className="auth-wrap"><span className="muted">Загрузка…</span></div>
+      </div>
+    );
+  }
+  if (phase === "banned") {
+    return (
+      <div className="tg" data-theme={prefs.theme} style={{ ...themeVars, display: "block" }}>
+        <style>{css}</style>
+        <div className="auth-wrap"><div className="auth-box">
+          <h1>🚫 Аккаунт заблокирован</h1>
+          <p className="sub">Администратор ограничил доступ к мессенджеру для этого аккаунта.</p>
+          <button className="btn" onClick={async () => { await supabase.auth.signOut(); setPhase("auth"); }}>Выйти</button>
+        </div></div>
       </div>
     );
   }
@@ -1662,7 +1746,7 @@ export default function App() {
                   {c.is_group ? <GroupAvatar chat={c} /> : c.u1 === c.u2 ? <Avatar user={{ tag: "⭐", frame: "none" }} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
-                      <span className="ci-name">{c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{notifModeOf(c.id) === "none" ? " 🔕" : notifModeOf(c.id) === "mentions" ? " ＠" : ""}</span>
+                      <span className="ci-name">{c.is_feedback ? "📮 " : c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{notifModeOf(c.id) === "none" ? " 🔕" : notifModeOf(c.id) === "mentions" ? " ＠" : ""}</span>
                       <span className="ci-time">{(prefs.pinned || []).includes(c.id) && "📌 "}{last ? fmtTime(last.created_at) : ""}</span>
                     </div>
                     <div className="ci-row">
@@ -1731,6 +1815,7 @@ export default function App() {
               <button className="chip" onClick={() => toggleBlock(peer)}>Разблокировать</button></div>
           )}
           <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={{ background: wpCss || undefined }}
+            onScroll={(e) => { const el = e.target; setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 600); }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => { e.preventDefault(); routeFile(e.dataTransfer.files?.[0]); }}>
             {(chatSearch ? activeMsgs.filter((m) => m.type === "text" && m.content.toLowerCase().includes(chatSearch.toLowerCase())) : activeMsgs).map((m, i, arr) => {
@@ -1759,7 +1844,12 @@ export default function App() {
                       onTouchEnd={bubbleTouchCancel}
                       onTouchMove={bubbleTouchCancel}>
                       {showSender && <div className="b-sender" style={{ color: senderColor(m.sender_id) }}>{profiles[m.sender_id]?.login || "…"}</div>}
-                      {m.reply_to && <div className="reply-quote"><b>{m.reply_to.name}</b>{m.reply_to.text}</div>}
+                      {m.reply_to && (
+                        <div className="reply-quote" style={{ cursor: "pointer" }} title="Перейти к сообщению"
+                          onClick={(e) => { e.stopPropagation(); scrollToMsg(m.reply_to.id); }}>
+                          <b>{m.reply_to.name}</b>{m.reply_to.text}
+                        </div>
+                      )}
                       {m.type === "text" && <MsgText text={m.content} query={chatSearch || ""} onMention={openByTag} />}
                       {showAsPhoto && <img className="b-img" src={m.content} alt="" onClick={() => setViewer(m.content)} />}
                       {m.type === "video" && <video className="b-img" src={m.content} controls style={{ maxHeight: 280 }} />}
@@ -1800,6 +1890,10 @@ export default function App() {
             {activeMsgs.length === 0 && <div className="placeholder" style={{ minHeight: 200 }}>Напишите первое сообщение</div>}
           </div>
 
+          {showJump && (
+            <button className="jump-down" title="Вниз"
+              onClick={() => msgsRef.current?.scrollTo({ top: msgsRef.current.scrollHeight, behavior: "smooth" })}>⌄</button>
+          )}
           {isChannel && !canPost ? (
             <div className="composer" style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center" }}>
               <span className="muted" style={{ fontSize: 14 }}>📣 Вы подписаны на канал</span>
@@ -1907,7 +2001,9 @@ export default function App() {
           <button className="d-row" onClick={() => { setShowContacts(true); }}><span className="d-ic">👫</span> Контакты</button>
           <button className="d-row" onClick={() => { setShowCalls(true); }}><span className="d-ic">📞</span> Звонки</button>
           <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> Избранное</button>
-          {amAppAdmin && <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> Статистика</button>}
+          <button className="d-row" onClick={openFeedback}><span className="d-ic">📮</span> Обратная связь</button>
+          {amAppAdmin && <button className="d-row" onClick={openAdmin}><span className="d-ic">🛡</span> Админ-панель</button>}
+          <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> Статистика</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> Настройки</button>
           <button className="d-row" onClick={() => setPrefsAnd({ theme: prefs.theme === "light" ? "dark" : "light" })}>
@@ -2309,7 +2405,7 @@ export default function App() {
                 <h3>Баннер</h3>
                 <div className="swatches">
                   {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i && !me.banner_color && !me.banner_img ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i, banner_color: null, banner_img: null })} />)}
-                  <ColorDot value={me.banner_color} title="Свой цвет баннера" onCommit={(v) => saveProfile({ banner_color: v, banner_img: null })} />
+                  <ColorDot value={me.banner_color?.startsWith?.("#") ? me.banner_color : null} title="Свой цвет баннера" onCommit={(v) => saveProfile({ banner_color: v, banner_img: null })} />
                 </div>
                 <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => meBannerInp.current?.click()}>🖼 Свой баннер (фото или GIF)</button>
                 <h3>Рамка аватара</h3>
@@ -2323,9 +2419,30 @@ export default function App() {
                 <h3>Цвета профиля</h3>
                 <div className="swatches">
                   <div className="sw sw-auto" title="Сбросить" onClick={() => saveProfile({ profile_bg: null, name_color: null })}>авто</div>
-                  <ColorDot value={me.profile_bg} fallback="#1d2733" title="Цвет фона профиля" onCommit={(v) => saveProfile({ profile_bg: v })} />
+                  <ColorDot value={me.profile_bg?.startsWith?.("#") ? me.profile_bg : null} fallback="#1d2733" title="Цвет фона профиля" onCommit={(v) => saveProfile({ profile_bg: v })} />
                   <ColorDot value={me.name_color} title="Цвет имени" onCommit={(v) => saveProfile({ name_color: v })} />
                 </div>
+                <h3>Градиент (2–3 цвета)</h3>
+                <div className="swatches" style={{ alignItems: "center" }}>
+                  <ColorDot value={(prefs.grad || {}).c1 || "#7b2ff7"} title="Цвет 1" onCommit={(v) => setPrefsAnd({ grad: { ...(prefs.grad || {}), c1: v } })} />
+                  <ColorDot value={(prefs.grad || {}).c2 || "#f107a3"} title="Цвет 2" onCommit={(v) => setPrefsAnd({ grad: { ...(prefs.grad || {}), c2: v } })} />
+                  <ColorDot value={(prefs.grad || {}).c3} fallback="#ffb86c" title="Цвет 3 (по желанию)" onCommit={(v) => setPrefsAnd({ grad: { ...(prefs.grad || {}), c3: v } })} />
+                  {(prefs.grad || {}).c3 && <button className="chip" onClick={() => setPrefsAnd({ grad: { ...(prefs.grad || {}), c3: null } })}>убрать 3-й</button>}
+                  {[["180deg", "↓"], ["90deg", "→"], ["135deg", "↘"], ["45deg", "↗"]].map(([a, l]) => (
+                    <button key={a} className={`chip${((prefs.grad || {}).angle || "135deg") === a ? " chip-on" : ""}`} onClick={() => setPrefsAnd({ grad: { ...(prefs.grad || {}), angle: a } })}>{l}</button>
+                  ))}
+                </div>
+                {(() => {
+                  const g = prefs.grad || {};
+                  const gcss = `linear-gradient(${g.angle || "135deg"}, ${g.c1 || "#7b2ff7"}, ${g.c2 || "#f107a3"}${g.c3 ? `, ${g.c3}` : ""})`;
+                  return (<>
+                    <div style={{ height: 36, borderRadius: 10, background: gcss, margin: "6px 0 8px" }} />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button className="btn ghost" style={{ flex: 1 }} onClick={() => saveProfile({ banner_color: gcss, banner_img: null })}>→ В баннер</button>
+                      <button className="btn ghost" style={{ flex: 1 }} onClick={() => saveProfile({ profile_bg: gcss })}>→ В фон профиля</button>
+                    </div>
+                  </>);
+                })()}
                 <p className="stat">Первый кружок — фон карточки под баннером, второй — цвет имени. Это видят все, кто откроет ваш профиль.</p>
                 <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
               </div>
@@ -2647,6 +2764,58 @@ export default function App() {
         round={crop.kind === "me" || crop.kind === "group"}
         onCancel={() => setCrop(null)} onSave={cropDone} />}
 
+      {/* АДМИН-ПАНЕЛЬ */}
+      {showAdmin && (
+        <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowAdmin(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              {!adminTarget ? (<>
+                <h3 style={{ marginTop: 0 }}>🛡 Админ-панель</h3>
+                <h3>Пользователи</h3>
+                <input className="field" placeholder="Поиск по @тегу или имени…" value={adminQuery} onChange={(e) => setAdminQuery(e.target.value)} />
+                {(adminResults || []).map((u) => (
+                  <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => setAdminTarget(u)}>
+                    <Avatar user={u} size="sm" online={isOn(u)} />
+                    <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
+                    <span>{u.restrictions?.banned ? "🚫" : Object.keys(u.restrictions || {}).length ? "⚠️" : ""}</span>
+                  </div>
+                ))}
+                <h3>Группы и каналы ({adminChats.length})</h3>
+                {adminChats.map((c) => (
+                  <div className="member-row" key={c.id}>
+                    <span style={{ fontSize: 17 }}>{c.is_channel ? "📣" : "👥"}</span>
+                    <span className="mr-name">{c.title}
+                      <div className="muted" style={{ fontSize: 12 }}>владелец: {c.owner_login || "?"} · {c.members} уч.</div>
+                    </span>
+                    <button className="icon-btn" title="Удалить безвозвратно" style={{ color: "#E26060" }} onClick={() => adminDeleteChat(c)}>🗑</button>
+                  </div>
+                ))}
+                <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowAdmin(false)}>Закрыть</button>
+              </>) : (<>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <button className="icon-btn" onClick={() => setAdminTarget(null)}>←</button>
+                  <Avatar user={adminTarget} size="sm" />
+                  <h3 style={{ margin: 0 }}>{adminTarget.login} <span className="muted">@{adminTarget.tag}</span></h3>
+                </div>
+                {[["banned", "🚫 Полная блокировка (бан)"],
+                  ["no_messages", "💬 Запрет отправки сообщений"],
+                  ["no_media", "🖼 Запрет фото, видео и файлов"],
+                  ["no_calls", "📞 Запрет звонков"],
+                  ["no_create", "👥 Запрет создания групп и каналов"]].map(([k, label]) => (
+                  <div className="toggle-row" key={k}>
+                    <span>{label}</span>
+                    <button className={`toggle${adminTarget.restrictions?.[k] ? " on" : ""}`}
+                      onClick={() => setRestriction(adminTarget, k, !adminTarget.restrictions?.[k])} />
+                  </div>
+                ))}
+                <p className="stat">Запреты сообщений, медиа и создания групп работают на уровне базы — обойти их нельзя. Запрет звонков действует в приложении. Бан скрывает мессенджер при следующем входе пользователя.</p>
+                <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setAdminTarget(null)}>← Назад</button>
+              </>)}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* СТАТИСТИКА (только админ) */}
       {showStats && (
         <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowStats(false)}>
@@ -2690,8 +2859,8 @@ export default function App() {
                 <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowStats(false)}>Закрыть</button>
               </>) : (<>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                  <button className="icon-btn" onClick={() => { setStatUser(null); setStatUserData(null); }}>←</button>
-                  <h3 style={{ margin: 0 }}>Статистика: {statUser.login} <span className="muted">@{statUser.tag}</span></h3>
+                  <button className="icon-btn" onClick={() => { if (amAppAdmin) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }}>{amAppAdmin ? "←" : "✕"}</button>
+                  <h3 style={{ margin: 0 }}>{!amAppAdmin ? "📊 Моя статистика" : <>Статистика: {statUser.login} <span className="muted">@{statUser.tag}</span></>}</h3>
                 </div>
                 {!statUserData ? <p className="muted" style={{ padding: 14, textAlign: "center" }}>Загрузка…</p> : (<>
                   <div className="stat-grid">
@@ -2712,7 +2881,7 @@ export default function App() {
                     </div>
                   ))}
                 </>)}
-                <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => { setStatUser(null); setStatUserData(null); }}>← Назад к общей</button>
+                <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => { if (amAppAdmin) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }}>{amAppAdmin ? "← Назад к общей" : "Закрыть"}</button>
               </>)}
             </div>
           </div>
