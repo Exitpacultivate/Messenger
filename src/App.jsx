@@ -25,6 +25,15 @@ const CallIc = {
   camOff: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="7" width="12" height="10" rx="2"/><path d="M15 10.5 21 7v10l-6-3.5"/><line x1="3" y1="3" x2="21" y2="21"/></svg>,
   phone: <svg viewBox="0 0 24 24" fill="currentColor"><path d="M22 16.92v2a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.08 4.18 2 2 0 0 1 4.06 2h2a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L7.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>,
 };
+const TURN_URLS = (import.meta.env.VITE_TURN_URL || "").split(",").map((x) => x.trim()).filter(Boolean);
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  ...(TURN_URLS.length ? [{
+    urls: TURN_URLS,
+    username: import.meta.env.VITE_TURN_USERNAME || "",
+    credential: import.meta.env.VITE_TURN_CREDENTIAL || "",
+  }] : []),
+];
 const blobToB64 = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
 const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
 
@@ -74,6 +83,24 @@ function VoiceBubble({ msg }) {
       <Waveform bars={msg.waveform || []} progress={prog} />
       <span className="muted" style={{ fontSize: 12 }}>{msg.duration}с</span>
     </div>
+  );
+}
+
+function ColorDot({ value, fallback = "#5AABF0", title, onCommit }) {
+  const [v, setV] = useState(value || fallback);
+  const tRef = useRef(null);
+  useEffect(() => { if (value) setV(value); }, [value]);
+  return (
+    <label className={`sw${value ? "" : " rainbow"}`} title={title}
+      style={{ position: "relative", overflow: "hidden", display: "inline-block", ...(value ? { background: v } : {}) }}>
+      <input type="color" value={v} style={{ opacity: 0, position: "absolute", inset: 0, cursor: "pointer" }}
+        onChange={(e) => {
+          const nv = e.target.value;
+          setV(nv);
+          clearTimeout(tRef.current);
+          tRef.current = setTimeout(() => onCommit(nv), 350);
+        }} />
+    </label>
   );
 }
 
@@ -130,6 +157,19 @@ function CropModal({ src, aspect = 1, round = true, onCancel, onSave }) {
   );
 }
 
+function MsgText({ text, query, onMention }) {
+  if (query) return <span>{highlight(text, query)}</span>;
+  const parts = text.split(/(@[a-zA-Z0-9_]{3,20})/g);
+  if (parts.length === 1) return <span>{text}</span>;
+  return (
+    <span>
+      {parts.map((part, i) => /^@[a-zA-Z0-9_]{3,20}$/.test(part)
+        ? <span key={i} className="mention" onClick={(e) => { e.stopPropagation(); onMention(part.slice(1)); }}>{part}</span>
+        : part)}
+    </span>
+  );
+}
+
 function highlight(text, q) {
   if (!q) return text;
   const i = text.toLowerCase().indexOf(q.toLowerCase());
@@ -150,7 +190,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -163,6 +203,7 @@ export default function App() {
   const [groupEdit, setGroupEdit] = useState(false);
   const [mediaTab, setMediaTab] = useState(null);
   const [reactFor, setReactFor] = useState(null);
+  const [reactViewer, setReactViewer] = useState(null);
   const [showMember, setShowMember] = useState(null);
   const [friends, setFriends] = useState(new Set());
   const [blocked, setBlocked] = useState(new Set());
@@ -181,11 +222,17 @@ export default function App() {
   const [call, setCall] = useState(null); // { peer, dir, status, video, startedAt }
   const [callMuted, setCallMuted] = useState(false);
   const [callCamOff, setCallCamOff] = useState(false);
+  const [callNet, setCallNet] = useState("");
   const [, setCallTick] = useState(0);
   const [showMenu, setShowMenu] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
   const [showCalls, setShowCalls] = useState(false);
   const [statusPick, setStatusPick] = useState(false);
+  const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+  const [chatMenu, setChatMenu] = useState(null); // { x, y, chat }
+  const [chatMenuFolders, setChatMenuFolders] = useState(false);
+  const [chatMenuNotif, setChatMenuNotif] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState(null);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -225,6 +272,8 @@ export default function App() {
   const candQueue = useRef([]);
   const ringRef = useRef(null);
   const callRef = useRef(null);
+  const prefsRef = useRef(null);
+  const chatsRef = useRef(null);
   const activeIdRef = useRef(null);
   activeIdRef.current = activeId;
 
@@ -234,6 +283,12 @@ export default function App() {
   const wpInp = useRef(null);
   const groupAvaInp = useRef(null);
 
+  prefsRef.current = prefs;
+  chatsRef.current = chats;
+  const meTagRef = useRef(null);
+  const meLoginRef = useRef(null);
+  meTagRef.current = me?.tag;
+  meLoginRef.current = me?.login;
   const activeChat = chats.find((c) => c.id === activeId);
   const isGroup = !!activeChat?.is_group;
   const peerId = activeChat && !isGroup && (activeChat.u1 === me?.id ? activeChat.u2 : activeChat.u1);
@@ -252,17 +307,59 @@ export default function App() {
     setToast(text);
     setTimeout(() => setToast(null), 2500);
   }
-  function tickSound() {
-    if (!prefs.typeSound) return;
+  function tickSound(kindOverride) {
+    const kind = kindOverride || (prefs.typeSound === true ? "classic" : prefs.typeSound);
+    if (!kind) return;
     try {
       if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       const ctx = audioCtxRef.current;
-      const o = ctx.createOscillator(); const g = ctx.createGain();
-      o.frequency.value = 1500 + Math.random() * 600;
-      g.gain.setValueAtTime(0.04, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.05);
-      o.connect(g); g.connect(ctx.destination);
-      o.start(); o.stop(ctx.currentTime + 0.06);
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const t = ctx.currentTime;
+      const tone = (type, freq, dur, vol, t0 = t, slideTo) => {
+        const o = ctx.createOscillator(); const g = ctx.createGain();
+        o.type = type; o.frequency.setValueAtTime(freq, t0);
+        if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+        g.gain.setValueAtTime(vol, t0);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(t0); o.stop(t0 + dur + 0.02);
+      };
+      if (kind === "classic") tone("sine", 1500 + Math.random() * 600, 0.05, 0.04);
+      else if (kind === "soft") tone("sine", 290 + Math.random() * 60, 0.07, 0.06);
+      else if (kind === "mech") { tone("square", 2200, 0.018, 0.025); tone("square", 900, 0.03, 0.03, t + 0.012); }
+      else if (kind === "bubble") tone("sine", 420, 0.07, 0.06, t, 1300);
+      else if (kind === "retro") { tone("square", 1100, 0.03, 0.03); tone("square", 1700, 0.025, 0.022, t + 0.045); }
+    } catch {}
+  }
+  function playMsgSound() {
+    try {
+      if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      [880, 1318].forEach((f, i) => {
+        const o = ctx.createOscillator(); const g = ctx.createGain();
+        o.type = "sine"; o.frequency.value = f;
+        const t0 = ctx.currentTime + i * 0.09;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.12, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(t0); o.stop(t0 + 0.2);
+      });
+    } catch {}
+  }
+  function maybeNotify(m) {
+    try {
+      if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+      if (!document.hidden && activeIdRef.current === m.chat_id) return;
+      const ch = (chatsRef.current || []).find((c) => c.id === m.chat_id);
+      const sender = profilesRef.current?.[m.sender_id]?.login || "Новое сообщение";
+      const title = ch?.is_group ? `${sender} — ${ch.title || "Группа"}` : sender;
+      const body = m.type === "text" ? m.content.slice(0, 80)
+        : ({ photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "Сообщение");
+      const ic = (APP_ICONS.find((i) => i.id === prefsRef.current?.icon) || APP_ICONS[0]).file;
+      const n = new Notification(title, { body, tag: m.chat_id, icon: ic });
+      n.onclick = () => { window.focus(); openChat(m.chat_id); n.close(); };
     } catch {}
   }
   async function setPrefsAnd(patch) {
@@ -363,6 +460,16 @@ export default function App() {
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (p) => {
         const m = p.new;
         ensureProfile(m.sender_id);
+        if (m.sender_id !== me.id) {
+          const pr = prefsRef.current || {};
+          const mode = (pr.notifMode || {})[m.chat_id] || ((pr.muted || []).includes(m.chat_id) ? "none" : "all");
+          const mentioned = (m.type === "text" && meTagRef.current && new RegExp(`@${meTagRef.current}\\b`, "i").test(m.content))
+            || (m.reply_to && m.reply_to.name && m.reply_to.name === meLoginRef.current);
+          if (mode === "all" || (mode === "mentions" && mentioned)) {
+            if (pr.msgSound !== false) playMsgSound();
+            maybeNotify(m);
+          }
+        }
         setMessages((d) => {
           const list = d[m.chat_id] || [];
           if (list.some((x) => x.id === m.id)) return d;
@@ -458,9 +565,12 @@ export default function App() {
           u = data; if (u) cacheProfiles([u]);
         }
         candQueue.current = [];
-        ringStart();
-        setCallMuted(false); setCallCamOff(false);
+        ringStart("in");
+        setCallMuted(false); setCallCamOff(false); setCallNet("");
         setCall({ peer: u || { id: from, login: name || "Звонок", tag: "?" }, dir: "in", status: "ringing", video: !!video, sdp });
+        if (document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") {
+          try { new Notification("Входящий звонок", { body: (u?.login || name || "") + (video ? " · видео" : ""), tag: "call" }); } catch {}
+        }
       })
       .on("broadcast", { event: "answer" }, async (p) => {
         const c = callRef.current;
@@ -469,6 +579,7 @@ export default function App() {
           await pcRef.current.setRemoteDescription(p.payload.sdp);
           for (const cand of candQueue.current) { try { await pcRef.current.addIceCandidate(cand); } catch {} }
           candQueue.current = [];
+          ringStop();
           setCall({ ...c, status: "active", startedAt: Date.now() });
         } catch {}
       })
@@ -486,20 +597,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, me?.id]);
   useEffect(() => {
-    if (call?.status !== "active") return;
-    attachStreams();
-    const t = setInterval(() => setCallTick((x) => x + 1), 1000);
-    return () => clearInterval(t);
+    if (call) attachStreams();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [call?.status, call?.video]);
+  useEffect(() => {
+    if (call?.status !== "active") return;
+    const t = setInterval(() => setCallTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [call?.status]);
 
   useEffect(() => {
-    if (!showContacts) return;
-    const missing = [...friends].filter((id) => !profiles[id]);
+    if (!showContacts && !showGroupNew && !reactViewer) return;
+    const extra = reactViewer ? Object.values(reactViewer.reactions || {}).flat() : [];
+    const missing = [...new Set([...friends, ...extra])].filter((id) => id !== me?.id && !profiles[id]);
     if (!missing.length) return;
     supabase.from("profiles").select("*").in("id", missing).then(({ data }) => data && cacheProfiles(data));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showContacts]);
+  }, [showContacts, showGroupNew, reactViewer]);
 
   // ---------- PRESENCE ----------
   useEffect(() => {
@@ -563,6 +677,8 @@ export default function App() {
     const onKey = (e) => {
       if (e.key !== "Escape") return;
       if (menu) setMenu(null);
+      else if (mentionQuery !== null) setMentionQuery(null);
+      else if (chatMenu) setChatMenu(null);
       else if (statusPick) setStatusPick(false);
       else if (showContacts) setShowContacts(false);
       else if (showCalls) setShowCalls(false);
@@ -577,7 +693,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -750,12 +866,28 @@ export default function App() {
     setAddQuery(""); setAddResults(null);
     notify(`${user.login} добавлен(а) ✓`);
   }
-  async function leaveGroup() {
-    const { error } = await supabase.from("chat_members").delete().eq("chat_id", activeId).eq("user_id", me.id);
+  async function leaveGroup(id = activeId) {
+    const { error } = await supabase.from("chat_members").delete().eq("chat_id", id).eq("user_id", me.id);
     if (error) { notify("Не удалось выйти."); return; }
     setShowChatInfo(false);
-    setChats((cs) => cs.filter((c) => c.id !== activeId));
-    setActiveId(null);
+    setChats((cs) => cs.filter((c) => c.id !== id));
+    if (activeId === id) setActiveId(null);
+  }
+  const inList = (key, id) => (prefs[key] || []).includes(id);
+  const toggleList = (key, id) => setPrefsAnd({ [key]: inList(key, id) ? prefs[key].filter((x) => x !== id) : [...(prefs[key] || []), id] });
+  async function clearHistory(c) {
+    if (!window.confirm(`Удалить все сообщения в «${chatTitle(c)}» у всех участников? Это необратимо.`)) return;
+    const { error } = await supabase.from("messages").delete().eq("chat_id", c.id);
+    if (error) { notify(`Не удалось очистить: ${error.message}`); return; }
+    setMessages((d) => ({ ...d, [c.id]: [] }));
+    notify("История очищена");
+  }
+  async function deleteDirectChat(c) {
+    if (!window.confirm(`Удалить чат с «${chatTitle(c)}» у обоих участников? Это необратимо.`)) return;
+    const { error } = await supabase.from("chats").delete().eq("id", c.id);
+    if (error) { notify(`Не удалось удалить: ${error.message}`); return; }
+    setChats((cs) => cs.filter((x) => x.id !== c.id));
+    if (activeId === c.id) setActiveId(null);
   }
   async function kickMember(uid) {
     const { error } = await supabase.from("chat_members").delete().eq("chat_id", activeId).eq("user_id", uid);
@@ -775,6 +907,15 @@ export default function App() {
     notify("Сохранено ✓");
   }
 
+  async function openByTag(tag) {
+    const lo = tag.toLowerCase();
+    let u = Object.values(profiles).find((x) => x.tag?.toLowerCase() === lo) || (me.tag?.toLowerCase() === lo ? me : null);
+    if (!u) {
+      const { data } = await supabase.from("profiles").select("*").ilike("tag", tag).limit(1).maybeSingle();
+      u = data; if (u) cacheProfiles([u]);
+    }
+    if (u) setShowMember(u); else notify("Пользователь не найден.");
+  }
   async function toggleFriend(u) {
     const isFr = friends.has(u.id);
     const { error } = isFr
@@ -817,21 +958,15 @@ export default function App() {
     ch.send({ type: "broadcast", event, payload: { from: me.id, ...payload } });
   }
   function newPC(peerId) {
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        // Бесплатный публичный TURN (Open Relay, проект Metered) — для сетей со строгим NAT
-        { urls: "turn:openrelay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
-        { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-        { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-      ],
-    });
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pc.onicecandidate = (e) => { if (e.candidate) signal(peerId, "candidate", { candidate: e.candidate.toJSON() }); };
     pc.ontrack = (e) => {
       remoteStreamRef.current = e.streams[0];
       attachStreams();
     };
     pc.onconnectionstatechange = () => {
+      setCallNet(pc.connectionState);
+      if (pc.connectionState === "failed") notify("Медиа-соединение не установилось — нужен TURN-сервер. Откройте ИНСТРУКЦИЯ-ЗВОНКИ.md в репозитории.");
       if (["failed", "disconnected", "closed"].includes(pc.connectionState)) endCall(false);
     };
     pcRef.current = pc;
@@ -854,17 +989,29 @@ export default function App() {
       localVideoRef.current.srcObject = ls;
     }
   }
-  function ringStart() {
+  function ringStart(kind) {
+    ringStop();
     try {
       if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       const ctx = audioCtxRef.current;
-      ringRef.current = setInterval(() => {
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const beep = (freq, t0, dur, vol) => {
         const o = ctx.createOscillator(); const g = ctx.createGain();
-        o.frequency.value = 660; g.gain.setValueAtTime(0.06, ctx.currentTime);
-        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.4);
+        o.type = "sine"; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(vol, t0 + 0.03);
+        g.gain.setValueAtTime(vol, t0 + dur - 0.05);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
         o.connect(g); g.connect(ctx.destination);
-        o.start(); o.stop(ctx.currentTime + 0.45);
-      }, 1500);
+        o.start(t0); o.stop(t0 + dur + 0.05);
+      };
+      const cycle = () => {
+        const t = ctx.currentTime + 0.05;
+        if (kind === "out") beep(425, t, 1.0, 0.07); // классический гудок ожидания
+        else { beep(740, t, 0.45, 0.09); beep(587, t + 0.55, 0.45, 0.09); } // входящая трель
+      };
+      cycle();
+      ringRef.current = setInterval(cycle, kind === "out" ? 4000 : 2200);
     } catch {}
   }
   function ringStop() { clearInterval(ringRef.current); ringRef.current = null; }
@@ -881,8 +1028,9 @@ export default function App() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await signal(to.id, "offer", { sdp: pc.localDescription, video: withVideo, name: me.login });
-      setCallMuted(false); setCallCamOff(false);
+      setCallMuted(false); setCallCamOff(false); setCallNet("");
       setCall({ peer: to, dir: "out", status: "ringing", video: withVideo });
+      ringStart("out");
     } catch {
       notify("Не удалось получить доступ к микрофону/камере.");
     }
@@ -980,10 +1128,13 @@ export default function App() {
   }
 
   function openChat(id) {
-    if (activeId) setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: draft } });
+    const patch = {};
+    if (activeId) patch.drafts = { ...prefs.drafts, [activeId]: draft };
+    if ((prefs.unreadMarks || []).includes(id)) patch.unreadMarks = prefs.unreadMarks.filter((x) => x !== id);
+    if (Object.keys(patch).length) setPrefsAnd(patch);
     setActiveId(id);
     setDraft(prefs.drafts?.[id] || "");
-    setReplyTo(null); setChatSearch(null); setShowEmoji(false); setShowAttach(false); setShowChatInfo(false);
+    setReplyTo(null); setChatSearch(null); setShowEmoji(false); setShowAttach(false); setShowChatInfo(false); setMentionQuery(null);
   }
 
   // ---------- СООБЩЕНИЯ ----------
@@ -1011,6 +1162,7 @@ export default function App() {
     sendMessage({ type: "text", content: t });
     if (text == null) {
       setDraft("");
+      setMentionQuery(null);
       if (taRef.current) taRef.current.style.height = "auto";
       setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: "" } });
     }
@@ -1170,8 +1322,20 @@ export default function App() {
     return (messages[c.id] || []).filter((m) => m.sender_id !== me.id && new Date(m.created_at).getTime() > myRead).length;
   };
   const lastMsgOf = (c) => (messages[c.id] || []).slice(-1)[0];
-  const isMuted = (id) => (prefs.muted || []).includes(id);
-  const toggleMute = (id) => setPrefsAnd({ muted: isMuted(id) ? (prefs.muted || []).filter((x) => x !== id) : [...(prefs.muted || []), id] });
+  const notifModeOf = (id) => (prefs.notifMode || {})[id] || ((prefs.muted || []).includes(id) ? "none" : "all");
+  const isMuted = (id) => notifModeOf(id) === "none";
+  const setNotifMode = (id, mode) => setPrefsAnd({
+    notifMode: { ...(prefs.notifMode || {}), [id]: mode },
+    muted: (prefs.muted || []).filter((x) => x !== id),
+  });
+  const NOTIF_LABEL = { all: "🔔 Все сообщения", mentions: "＠ Только упоминания", none: "🔕 Без уведомлений" };
+  const cycleNotif = (id) => {
+    const order = ["all", "mentions", "none"];
+    const next = order[(order.indexOf(notifModeOf(id)) + 1) % 3];
+    setNotifMode(id, next);
+    notify(NOTIF_LABEL[next]);
+  };
+  const toggleMute = (id) => setNotifMode(id, isMuted(id) ? "all" : "none");
   const AUDIO_RE = /\.(mp3|m4a|wav|ogg|flac)$/i;
   const mediaOf = (type) => {
     const list = messages[activeId] || [];
@@ -1212,19 +1376,25 @@ export default function App() {
     : { background: o?.banner_color || BANNERS[o?.banner] || BANNERS[0] };
   const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
   const sortedChats = useMemo(() => [...chats].sort((a, b) => {
+    const pa = (prefs.pinned || []).includes(a.id) ? 1 : 0;
+    const pb = (prefs.pinned || []).includes(b.id) ? 1 : 0;
+    if (pa !== pb) return pb - pa;
     const la = lastMsgOf(a) ? new Date(lastMsgOf(a).created_at).getTime() : new Date(a.created_at).getTime();
     const lb = lastMsgOf(b) ? new Date(lastMsgOf(b).created_at).getTime() : new Date(b.created_at).getTime();
     return lb - la;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [chats, messages]);
+  }), [chats, messages, prefs.pinned]);
 
   const folderChats = useMemo(() => {
-    if (activeFolder === "all") return sortedChats;
-    if (activeFolder === "__friends") return sortedChats.filter((c) => !c.is_group && c.u1 !== c.u2 && friends.has(c.u1 === me?.id ? c.u2 : c.u1));
+    const arch = prefs.archived || [];
+    if (activeFolder === "__archive") return sortedChats.filter((c) => arch.includes(c.id));
+    const base = sortedChats.filter((c) => !arch.includes(c.id));
+    if (activeFolder === "all") return base;
+    if (activeFolder === "__friends") return base.filter((c) => !c.is_group && c.u1 !== c.u2 && friends.has(c.u1 === me?.id ? c.u2 : c.u1));
     const f = (prefs.folders || []).find((x) => x.id === activeFolder);
-    return f ? sortedChats.filter((c) => f.chatIds.includes(c.id)) : sortedChats;
+    return f ? base.filter((c) => f.chatIds.includes(c.id)) : base;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortedChats, activeFolder, friends, prefs.folders, me?.id]);
+  }, [sortedChats, activeFolder, friends, prefs.folders, prefs.archived, me?.id]);
 
   // ============ РЕНДЕР ============
   if (phase === "config") {
@@ -1293,7 +1463,7 @@ export default function App() {
 
   return (
     <div className={`tg view-${activeId ? "chat" : "list"}`} data-theme={prefs.theme} style={themeVars}
-      onClick={() => { menu && setMenu(null); showAttach && setShowAttach(false); }}>
+      onClick={() => { menu && setMenu(null); chatMenu && setChatMenu(null); showAttach && setShowAttach(false); }}>
       <style>{css}</style>
 
       <input ref={avatarInp} type="file" accept="image/*" hidden onChange={async (e) => {
@@ -1367,6 +1537,9 @@ export default function App() {
               {f.name}{activeFolder === f.id ? " ✏️" : ""}
             </button>
           ))}
+          {(prefs.archived || []).length > 0 && (
+            <button className={`ftab${activeFolder === "__archive" ? " on" : ""}`} onClick={() => setActiveFolder("__archive")}>🗄 Архив</button>
+          )}
           <button className="ftab" title="Новая папка" onClick={() => openFolderEditor("new")}>＋</button>
         </div>
         <div className="chats">
@@ -1403,16 +1576,22 @@ export default function App() {
                 ? `${last.sender_id === me.id ? "Вы" : (c.is_group ? (profiles[last.sender_id]?.login || "…") : "")}${last.sender_id === me.id || c.is_group ? ": " : ""}${previewOf(last)}`
                 : c.is_group ? "Группа создана" : "Чат создан";
               return (
-                <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id} onClick={() => openChat(c.id)}>
+                <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id} onClick={() => openChat(c.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setChatMenuFolders(false);
+                    setChatMenuNotif(false);
+                    setChatMenu({ x: Math.min(e.clientX, window.innerWidth - 240), y: Math.min(e.clientY, window.innerHeight - 340), chat: c });
+                  }}>
                   {c.is_group ? <GroupAvatar chat={c} /> : c.u1 === c.u2 ? <Avatar user={{ tag: "⭐", frame: "none" }} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
-                      <span className="ci-name">{c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{isMuted(c.id) && " 🔕"}</span>
-                      <span className="ci-time">{last ? fmtTime(last.created_at) : ""}</span>
+                      <span className="ci-name">{c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{notifModeOf(c.id) === "none" ? " 🔕" : notifModeOf(c.id) === "mentions" ? " ＠" : ""}</span>
+                      <span className="ci-time">{(prefs.pinned || []).includes(c.id) && "📌 "}{last ? fmtTime(last.created_at) : ""}</span>
                     </div>
                     <div className="ci-row">
                       <span className="ci-last">{prefs.drafts?.[c.id] ? `✏️ ${prefs.drafts[c.id].slice(0, 40)}` : lastLabel}</span>
-                      {n > 0 && !isMuted(c.id) && <span className="badge">{n}</span>}
+                      {(n > 0 || (prefs.unreadMarks || []).includes(c.id)) && !isMuted(c.id) && <span className="badge">{n > 0 ? n : "•"}</span>}
                     </div>
                   </div>
                 </div>
@@ -1505,7 +1684,7 @@ export default function App() {
                       onTouchMove={bubbleTouchCancel}>
                       {showSender && <div className="b-sender" style={{ color: senderColor(m.sender_id) }}>{profiles[m.sender_id]?.login || "…"}</div>}
                       {m.reply_to && <div className="reply-quote"><b>{m.reply_to.name}</b>{m.reply_to.text}</div>}
-                      {m.type === "text" && <span>{highlight(m.content, chatSearch || "")}</span>}
+                      {m.type === "text" && <MsgText text={m.content} query={chatSearch || ""} onMention={openByTag} />}
                       {showAsPhoto && <img className="b-img" src={m.content} alt="" onClick={() => setViewer(m.content)} />}
                       {m.type === "video" && <video className="b-img" src={m.content} controls style={{ maxHeight: 280 }} />}
                       {m.type === "file" && !showAsPhoto && (
@@ -1519,7 +1698,8 @@ export default function App() {
                       {Object.keys(m.reactions || {}).length > 0 && (
                         <div className="reacts">
                           {Object.entries(m.reactions).map(([e, ids]) => (
-                            <button key={e} className={`react-chip${ids.includes(me.id) ? " mine" : ""}`} onClick={() => toggleReaction(m, e)}>
+                            <button key={e} className={`react-chip${ids.includes(me.id) ? " mine" : ""}`} onClick={() => toggleReaction(m, e)}
+                              onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); setReactViewer(m); }}>
                               {e} {ids.length}
                             </button>
                           ))}
@@ -1540,7 +1720,7 @@ export default function App() {
           {isChannel && !canPost ? (
             <div className="composer" style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "center" }}>
               <span className="muted" style={{ fontSize: 14 }}>📣 Вы подписаны на канал</span>
-              <button className="chip" onClick={() => toggleMute(activeId)}>{isMuted(activeId) ? "🔕 Включить звук" : "🔔 Без звука"}</button>
+              <button className="chip" onClick={() => cycleNotif(activeId)}>{NOTIF_LABEL[notifModeOf(activeId)]}</button>
             </div>
           ) : (
           <div className="composer">
@@ -1557,6 +1737,23 @@ export default function App() {
               </div>
             )}
             <div className="compose-row" style={{ position: "relative" }}>
+              {mentionQuery !== null && isGroup && (() => {
+                const list = activeMembers.filter((u) => u.id !== me.id
+                  && ((u.tag || "").toLowerCase().startsWith(mentionQuery) || (u.login || "").toLowerCase().startsWith(mentionQuery))).slice(0, 6);
+                return list.length ? (
+                  <div className="mention-pop">
+                    {list.map((u) => (
+                      <button key={u.id} onClick={() => {
+                        setDraft((d) => d.replace(/@([a-zA-Z0-9_]*)$/, `@${u.tag} `));
+                        setMentionQuery(null);
+                        taRef.current?.focus();
+                      }}>
+                        <Avatar user={u} size="xs" /> <b>{u.login}</b> <span className="muted">@{u.tag}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null;
+              })()}
               {showEmoji && (
                 <div className="emoji-pop">
                   <div className="emoji-tabs">
@@ -1585,7 +1782,15 @@ export default function App() {
                 </div>
               ) : (
                 <textarea ref={taRef} rows={1} placeholder="Сообщение" value={draft}
-                  onChange={(e) => { setDraft(e.target.value); notifyTyping(); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setDraft(v);
+                    notifyTyping();
+                    const upto = v.slice(0, e.target.selectionStart);
+                    const mm = isGroup ? upto.match(/@([a-zA-Z0-9_]*)$/) : null;
+                    setMentionQuery(mm ? mm[1].toLowerCase() : null);
+                    e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+                  }}
                   onKeyDown={(e) => { tickSound(); if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); } }} />
               )}
               <button className="send-btn" title="Отправить" disabled={!draft.trim() && !recording}
@@ -1697,6 +1902,42 @@ export default function App() {
         </div>
       )}
 
+      {/* МЕНЮ ЧАТА (правый клик по списку) */}
+      {chatMenu && (
+        <div className="menu" style={{ left: chatMenu.x, top: chatMenu.y, minWidth: 215 }} onClick={(e) => e.stopPropagation()}>
+          <button onClick={() => { toggleList("archived", chatMenu.chat.id); setChatMenu(null); }}>
+            🗄 {inList("archived", chatMenu.chat.id) ? "Вернуть из архива" : "Архивировать"}
+          </button>
+          <button onClick={() => { toggleList("pinned", chatMenu.chat.id); setChatMenu(null); }}>
+            📌 {inList("pinned", chatMenu.chat.id) ? "Открепить" : "Закрепить"}
+          </button>
+          <button onClick={() => setChatMenuNotif(!chatMenuNotif)}>🔔 Уведомления {chatMenuNotif ? "▾" : "›"}</button>
+          {chatMenuNotif && ["all", "mentions", "none"].map((mo) => (
+            <button key={mo} style={{ paddingLeft: 34 }} onClick={() => { setNotifMode(chatMenu.chat.id, mo); setChatMenu(null); }}>
+              {notifModeOf(chatMenu.chat.id) === mo ? "✓ " : "　"}{NOTIF_LABEL[mo]}
+            </button>
+          ))}
+          <button onClick={() => { toggleList("unreadMarks", chatMenu.chat.id); setChatMenu(null); }}>
+            💬 {inList("unreadMarks", chatMenu.chat.id) ? "Снять метку" : "Отметить непрочитанным"}
+          </button>
+          <button onClick={() => setChatMenuFolders(!chatMenuFolders)}>📁 Добавить в папку {chatMenuFolders ? "▾" : "›"}</button>
+          {chatMenuFolders && ((prefs.folders || []).length ? (prefs.folders || []).map((f) => (
+            <button key={f.id} style={{ paddingLeft: 34 }} onClick={() => {
+              const has = f.chatIds.includes(chatMenu.chat.id);
+              setPrefsAnd({ folders: prefs.folders.map((x) => x.id === f.id ? { ...x, chatIds: has ? x.chatIds.filter((i) => i !== chatMenu.chat.id) : [...x.chatIds, chatMenu.chat.id] } : x) });
+            }}>{f.chatIds.includes(chatMenu.chat.id) ? "✓ " : "　"}{f.name}</button>
+          )) : <button style={{ paddingLeft: 34, color: "var(--muted)" }} onClick={() => { setChatMenu(null); openFolderEditor("new"); }}>Создать папку…</button>)}
+          <button onClick={() => { const c = chatMenu.chat; setChatMenu(null); clearHistory(c); }}>🧹 Очистить историю</button>
+          {chatMenu.chat.is_group ? (
+            <button style={{ color: "#E26060" }} onClick={() => { const c = chatMenu.chat; setChatMenu(null); leaveGroup(c.id); }}>
+              🚪 {chatMenu.chat.is_channel ? "Отписаться от канала" : "Покинуть группу"}
+            </button>
+          ) : chatMenu.chat.u1 !== chatMenu.chat.u2 ? (
+            <button style={{ color: "#E26060" }} onClick={() => { const c = chatMenu.chat; setChatMenu(null); deleteDirectChat(c); }}>🗑 Удалить чат</button>
+          ) : null}
+        </div>
+      )}
+
       {/* КОНТЕКСТНОЕ МЕНЮ */}
       {menu && (
         <div className="menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
@@ -1708,6 +1949,7 @@ export default function App() {
           {menu.msg.type === "text" && <button onClick={() => { navigator.clipboard?.writeText(menu.msg.content); setMenu(null); }}>📋 Копировать</button>}
           <button onClick={() => pinMsg(menu.msg)}>📌 {activeChat?.pinned_msg === menu.msg.id ? "Открепить" : "Закрепить"}</button>
           {menu.msg.sender_id === me.id && isGroup && <button onClick={() => { const m = menu.msg; setMenu(null); setReadersFor(m); }}>👁 Кто прочитал</button>}
+          {Object.keys(menu.msg.reactions || {}).length > 0 && <button onClick={() => { const m = menu.msg; setMenu(null); setReactViewer(m); }}>👀 Кто поставил реакции</button>}
           {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
         </div>
       )}
@@ -1760,7 +2002,11 @@ export default function App() {
               )}
               <input className="field" placeholder="Найти участника по @тегу…" value={groupQuery}
                 onChange={(e) => setGroupQuery(e.target.value)} />
-              {(groupResults || []).map((u) => (
+              {!groupQuery.trim() && friends.size > 0 && <p className="stat" style={{ margin: "2px 0 6px" }}>Ваши контакты:</p>}
+              {(groupQuery.trim()
+                ? (groupResults || [])
+                : [...friends].map((id) => profiles[id]).filter(Boolean).filter((u) => !groupPicks.some((pk) => pk.id === u.id))
+              ).map((u) => (
                 <div className="member-row" key={u.id} style={{ cursor: "pointer" }}
                   onClick={() => { setGroupPicks([...groupPicks, u]); setGroupQuery(""); }}>
                   <Avatar user={u} size="sm" online={isOn(u)} />
@@ -1888,8 +2134,9 @@ export default function App() {
                   {activeChat.description && <p style={{ marginTop: 8, fontSize: 14.5, lineHeight: 1.4 }}>{activeChat.description}</p>}
 
                   <div className="ios-actions">
-                    <button className="ios-btn" onClick={() => toggleMute(activeId)}>
-                      <span className="ic">{isMuted(activeId) ? "🔕" : "🔔"}</span>{isMuted(activeId) ? "Вкл. звук" : "Без звука"}
+                    <button className="ios-btn" onClick={() => cycleNotif(activeId)} title="Все → Упоминания → Тишина">
+                      <span className="ic">{notifModeOf(activeId) === "none" ? "🔕" : notifModeOf(activeId) === "mentions" ? "＠" : "🔔"}</span>
+                      {notifModeOf(activeId) === "none" ? "Заглушено" : notifModeOf(activeId) === "mentions" ? "Упоминания" : "Все"}
                     </button>
                     {(amOwner || myRow?.role === "admin") && (
                       <button className="ios-btn" onClick={() => setGroupEdit(true)}><span className="ic">⚙️</span>Управление</button>
@@ -1935,8 +2182,8 @@ export default function App() {
               <div className="banner" style={bannerCss(peer)}>
                 <Avatar user={peer} size="lg" />
               </div>
-              <div className="modal-pad" style={{ paddingTop: 58 }}>
-                <div style={{ fontWeight: 700, fontSize: 19 }}>{peer.login}{peer.status_emoji ? ` ${peer.status_emoji}` : ""}</div>
+              <div className="modal-pad" style={{ paddingTop: 58, background: peer.profile_bg || undefined }}>
+                <div style={{ fontWeight: 700, fontSize: 19, color: peer.name_color || undefined }}>{peer.login}{peer.status_emoji ? ` ${peer.status_emoji}` : ""}</div>
                 <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
                 {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
                 <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
@@ -1962,8 +2209,8 @@ export default function App() {
                 <Avatar user={me} size="lg" />
               </div>
             </div>
-            <div className="modal-pad" style={{ paddingTop: 58 }}>
-              <div style={{ fontWeight: 700, fontSize: 19 }}>{me.login}</div>
+            <div className="modal-pad" style={{ paddingTop: 58, background: me.profile_bg || undefined }}>
+              <div style={{ fontWeight: 700, fontSize: 19, color: me.name_color || undefined }}>{me.login}</div>
               <div className="muted" style={{ fontSize: 14, marginBottom: 10 }}>@{me.tag} · нажмите на аватар, чтобы сменить</div>
 
               <div className="sec">
@@ -1973,7 +2220,7 @@ export default function App() {
                 <h3>Баннер</h3>
                 <div className="swatches">
                   {BANNERS.map((b, i) => <div key={i} className={`sw${me.banner === i && !me.banner_color && !me.banner_img ? " sel" : ""}`} style={{ background: b }} onClick={() => saveProfile({ banner: i, banner_color: null, banner_img: null })} />)}
-                  <label className="sw rainbow" title="Свой цвет баннера"><input type="color" value={me.banner_color || "#5AABF0"} onChange={(e) => saveProfile({ banner_color: e.target.value, banner_img: null })} /></label>
+                  <ColorDot value={me.banner_color} title="Свой цвет баннера" onCommit={(v) => saveProfile({ banner_color: v, banner_img: null })} />
                 </div>
                 <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => meBannerInp.current?.click()}>🖼 Свой баннер (фото или GIF)</button>
                 <h3>Рамка аватара</h3>
@@ -1982,8 +2229,15 @@ export default function App() {
                     <div key={f.id} className={`sw${(me.frame || "none") === f.id ? " sel" : ""}`}
                       style={{ background: f.id === "none" ? "var(--bg)" : f.css }} title={f.name} onClick={() => saveProfile({ frame: f.id })} />
                   ))}
-                  <label className="sw rainbow" title="Свой цвет рамки"><input type="color" value={me.frame?.startsWith?.("#") ? me.frame : "#5AABF0"} onChange={(e) => saveProfile({ frame: e.target.value })} /></label>
+                  <ColorDot value={me.frame?.startsWith?.("#") ? me.frame : null} title="Свой цвет рамки" onCommit={(v) => saveProfile({ frame: v })} />
                 </div>
+                <h3>Цвета профиля</h3>
+                <div className="swatches">
+                  <div className="sw sw-auto" title="Сбросить" onClick={() => saveProfile({ profile_bg: null, name_color: null })}>авто</div>
+                  <ColorDot value={me.profile_bg} fallback="#1d2733" title="Цвет фона профиля" onCommit={(v) => saveProfile({ profile_bg: v })} />
+                  <ColorDot value={me.name_color} title="Цвет имени" onCommit={(v) => saveProfile({ name_color: v })} />
+                </div>
+                <p className="stat">Первый кружок — фон карточки под баннером, второй — цвет имени. Это видят все, кто откроет ваш профиль.</p>
                 <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
               </div>
 
@@ -1998,17 +2252,17 @@ export default function App() {
                 <h3>Акцентный цвет</h3>
                 <div className="swatches">
                   {ACCENTS.map((c) => <div key={c} className={`sw${prefs.accent === c ? " sel" : ""}`} style={{ background: c }} onClick={() => setPrefsAnd({ accent: c })} />)}
-                  <label className="sw rainbow" title="Свой цвет"><input type="color" value={prefs.accent} onChange={(e) => setPrefsAnd({ accent: e.target.value })} /></label>
+                  <ColorDot value={prefs.accent} title="Свой цвет" onCommit={(v) => setPrefsAnd({ accent: v })} />
                 </div>
                 <h3>Цвет моих сообщений</h3>
                 <div className="swatches">
                   <div className={`sw${!prefs.bubbleColor ? " sel" : ""} sw-auto`} onClick={() => setPrefsAnd({ bubbleColor: null })}>авто</div>
-                  <label className="sw rainbow" title="Свой цвет пузырей"><input type="color" value={prefs.bubbleColor || "#2B5278"} onChange={(e) => setPrefsAnd({ bubbleColor: e.target.value })} /></label>
+                  <ColorDot value={prefs.bubbleColor} fallback="#2B5278" title="Свой цвет пузырей" onCommit={(v) => setPrefsAnd({ bubbleColor: v })} />
                 </div>
                 <h3>Цвет ников в группах</h3>
                 <div className="swatches">
                   <div className={`sw${!prefs.nickColor ? " sel" : ""} sw-auto`} onClick={() => setPrefsAnd({ nickColor: null })}>авто</div>
-                  <label className="sw rainbow" title="Свой цвет ников"><input type="color" value={prefs.nickColor || "#5AABF0"} onChange={(e) => setPrefsAnd({ nickColor: e.target.value })} /></label>
+                  <ColorDot value={prefs.nickColor} title="Свой цвет ников" onCommit={(v) => setPrefsAnd({ nickColor: v })} />
                 </div>
                 <h3>Шрифт</h3>
                 <div className="quick-chips">
@@ -2034,10 +2288,25 @@ export default function App() {
                     onClick={() => wpInp.current?.click()}>Своя 📁</div>
                 </div>
                 <p className="stat">Свою картинку можно кадрировать, GIF ставится как есть.</p>
-                <div className="toggle-row">
-                  <span>🔊 Звук при печати</span>
-                  <button className={`toggle${prefs.typeSound ? " on" : ""}`} onClick={() => setPrefsAnd({ typeSound: !prefs.typeSound })} />
+                <h3>⌨️ Звук печати</h3>
+                <div className="quick-chips">
+                  {[[false, "Выкл"], ["classic", "Классика"], ["soft", "Мягкий"], ["mech", "Механика"], ["bubble", "Пузырёк"], ["retro", "Ретро"]].map(([k, l]) => (
+                    <button key={String(k)} className={`chip${(prefs.typeSound === k || (k === "classic" && prefs.typeSound === true)) ? " chip-on" : ""}`}
+                      onClick={() => { setPrefsAnd({ typeSound: k }); if (k) tickSound(k); }}>{l}</button>
+                  ))}
                 </div>
+                <div className="toggle-row">
+                  <span>💬 Звук новых сообщений</span>
+                  <button className={`toggle${prefs.msgSound !== false ? " on" : ""}`} onClick={() => setPrefsAnd({ msgSound: prefs.msgSound === false })} />
+                </div>
+                <div className="toggle-row">
+                  <span>🔔 Уведомления на устройство</span>
+                  {notifPerm === "granted" ? <span style={{ color: "var(--accent)", fontSize: 13.5 }}>включены ✓</span>
+                    : notifPerm === "denied" ? <span className="muted" style={{ fontSize: 12.5 }}>заблокированы в браузере</span>
+                    : notifPerm === "unsupported" ? <span className="muted" style={{ fontSize: 12.5 }}>не поддерживаются</span>
+                    : <button className="chip" onClick={async () => { try { setNotifPerm(await Notification.requestPermission()); } catch {} }}>Включить</button>}
+                </div>
+                <p className="stat">Уведомления и звуки работают, пока сайт открыт — в том числе в фоновой вкладке. Заглушённые чаты (🔕) не шумят.</p>
               </div>
 
               <div className="sec">
@@ -2119,8 +2388,8 @@ export default function App() {
             <div className="banner" style={bannerCss(showMember)}>
               <Avatar user={showMember} size="lg" />
             </div>
-            <div className="modal-pad" style={{ paddingTop: 58 }}>
-              <div style={{ fontWeight: 700, fontSize: 19 }}>{showMember.login}</div>
+            <div className="modal-pad" style={{ paddingTop: 58, background: showMember.profile_bg || undefined }}>
+              <div style={{ fontWeight: 700, fontSize: 19, color: showMember.name_color || undefined }}>{showMember.login}</div>
               <div className="muted" style={{ fontSize: 14 }}>@{showMember.tag} · {lastSeenText(showMember)}</div>
               {showMember.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{showMember.bio}</p>}
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
@@ -2158,6 +2427,37 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* КТО ПОСТАВИЛ РЕАКЦИИ */}
+      {reactViewer && (() => {
+        const live = (messages[reactViewer.chat_id] || []).find((x) => x.id === reactViewer.id) || reactViewer;
+        return (
+          <div className="overlay" style={{ zIndex: 70 }} onClick={() => setReactViewer(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-pad">
+                <h3 style={{ marginTop: 0 }}>👀 Реакции</h3>
+                {Object.entries(live.reactions || {}).map(([emo, ids]) => (
+                  <div key={emo} style={{ marginBottom: 8 }}>
+                    {ids.map((uid) => {
+                      const u = uid === me.id ? me : profiles[uid];
+                      return (
+                        <div className="member-row" key={uid} style={{ cursor: u && uid !== me.id ? "pointer" : "default" }}
+                          onClick={() => u && uid !== me.id && setShowMember(u)}>
+                          <span style={{ fontSize: 20, width: 26, textAlign: "center" }}>{emo}</span>
+                          <Avatar user={u || { tag: "?" }} size="sm" online={isOn(u)} />
+                          <span className="mr-name">{u?.login || "…"} {uid === me.id && <span className="muted">(вы)</span>}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+                {!Object.keys(live.reactions || {}).length && <p className="muted" style={{ textAlign: "center", padding: 12 }}>Реакций больше нет</p>}
+                <button className="btn ghost" onClick={() => setReactViewer(null)}>Закрыть</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ПАПКИ */}
       {folderEdit && (
@@ -2215,7 +2515,9 @@ export default function App() {
             <div className="call-status">
               {call.status === "ringing"
                 ? (call.dir === "in" ? `Входящий ${call.video ? "видео" : "аудио"}звонок…` : "Звоним…")
-                : (() => { const d = Math.floor((Date.now() - call.startedAt) / 1000); return `${String(Math.floor(d / 60)).padStart(2, "0")}:${String(d % 60).padStart(2, "0")}`; })()}
+                : !["connected", "completed"].includes(callNet)
+                  ? "Соединяем…"
+                  : (() => { const d = Math.floor((Date.now() - call.startedAt) / 1000); return `${String(Math.floor(d / 60)).padStart(2, "0")}:${String(d % 60).padStart(2, "0")}`; })()}
             </div>
           </div>
           {call.video && <video ref={localVideoRef} autoPlay playsInline muted className="call-local" />}

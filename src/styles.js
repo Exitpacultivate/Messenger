@@ -276,4 +276,13 @@ mark { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2p
 .call-btn svg { width: 26px; height: 26px; display: block; }
 .call-btn { display: flex; align-items: center; justify-content: center; }
 .call-btn.active-w { background: #fff; color: #1a2233; }
+
+.mention { color: var(--accent); font-weight: 600; cursor: pointer; }
+.mention:hover { text-decoration: underline; }
+.mention-pop { position: absolute; bottom: 100%; left: 8px; right: 8px; margin-bottom: 6px;
+  background: var(--side); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  z-index: 20; box-shadow: 0 6px 24px rgba(0,0,0,0.35); }
+.mention-pop button { display: flex; gap: 8px; align-items: center; width: 100%; padding: 8px 12px;
+  background: none; border: none; color: var(--text); cursor: pointer; font-size: 14px; }
+.mention-pop button:hover { background: var(--hover); }
 `;
