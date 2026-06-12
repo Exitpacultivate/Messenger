@@ -157,6 +157,21 @@ function CropModal({ src, aspect = 1, round = true, onCancel, onSave }) {
   );
 }
 
+function Bars({ data, lk, vk }) {
+  if (!data?.length) return <p className="muted" style={{ fontSize: 13, padding: 6 }}>Данных пока нет</p>;
+  const max = Math.max(1, ...data.map((d) => d[vk]));
+  return (
+    <div className="bars">
+      {data.map((d, i) => (
+        <div className="bar-col" key={i} title={`${d[lk]}: ${d[vk]}`}>
+          <div className="bar" style={{ height: `${Math.round((d[vk] / max) * 58) + 3}px` }} />
+          <span>{d[lk]}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MsgText({ text, query, onMention }) {
   if (query) return <span>{highlight(text, query)}</span>;
   const parts = text.split(/(@[a-zA-Z0-9_]{3,20})/g);
@@ -190,7 +205,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, uiVars: {}, btnIcons: {}, btnAnim: {}, ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -233,6 +248,14 @@ export default function App() {
   const [chatMenuFolders, setChatMenuFolders] = useState(false);
   const [chatMenuNotif, setChatMenuNotif] = useState(false);
   const [mentionQuery, setMentionQuery] = useState(null);
+  const [showStats, setShowStats] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [statUser, setStatUser] = useState(null);
+  const [statUserData, setStatUserData] = useState(null);
+  const [statQuery, setStatQuery] = useState("");
+  const [statResults, setStatResults] = useState(null);
+  const [showBuilder, setShowBuilder] = useState(false);
+  const [builderEmoji, setBuilderEmoji] = useState(null);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -258,6 +281,10 @@ export default function App() {
   const lastTypingSend = useRef(0);
   const chatChannelRef = useRef(null);
   const lpTimer = useRef(null);
+  const lpChat = useRef(null);
+  const suppressClick = useRef(false);
+  const builderImgFor = useRef(null);
+  const builderImgInp = useRef(null);
   const originalRef = useRef(false);
   const msgRefs = useRef({});
   const meBannerInp = useRef(null);
@@ -680,6 +707,9 @@ export default function App() {
       else if (mentionQuery !== null) setMentionQuery(null);
       else if (chatMenu) setChatMenu(null);
       else if (statusPick) setStatusPick(false);
+      else if (builderEmoji) setBuilderEmoji(null);
+      else if (showBuilder) setShowBuilder(false);
+      else if (showStats) { if (statUser) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }
       else if (showContacts) setShowContacts(false);
       else if (showCalls) setShowCalls(false);
       else if (showMenu) setShowMenu(false);
@@ -693,7 +723,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -784,6 +814,7 @@ export default function App() {
   useUserSearch(userQuery, setSearchResults);
   useUserSearch(groupQuery, setGroupResults, (u) => !groupPicks.some((p) => p.id === u.id));
   useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).some((m) => m.user_id === u.id));
+  useUserSearch(statQuery, setStatResults);
 
   useEffect(() => {
     if (phase !== "main") return;
@@ -964,7 +995,10 @@ export default function App() {
       remoteStreamRef.current = e.streams[0];
       attachStreams();
     };
+    console.log("[звонок] ICE-серверы:", ICE_SERVERS);
+    pc.oniceconnectionstatechange = () => console.log("[звонок] ICE:", pc.iceConnectionState);
     pc.onconnectionstatechange = () => {
+      console.log("[звонок] соединение:", pc.connectionState);
       setCallNet(pc.connectionState);
       if (pc.connectionState === "failed") notify("Медиа-соединение не установилось — нужен TURN-сервер. Откройте ИНСТРУКЦИЯ-ЗВОНКИ.md в репозитории.");
       if (["failed", "disconnected", "closed"].includes(pc.connectionState)) endCall(false);
@@ -1084,6 +1118,18 @@ export default function App() {
     if (tr) { tr.enabled = !tr.enabled; setCallCamOff(!tr.enabled); }
   }
 
+  async function loadStats() {
+    setShowMenu(false); setShowStats(true); setStatUser(null); setStatUserData(null); setStats(null);
+    const { data, error } = await supabase.rpc("admin_stats");
+    if (error || !data) { notify("Статистика недоступна: выполните миграцию v10 в Supabase."); return; }
+    setStats(data);
+  }
+  async function loadUserStats(u) {
+    setStatUser(u); setStatUserData(null); setStatQuery(""); setStatResults(null);
+    const { data, error } = await supabase.rpc("admin_user_stats", { uid: u.id });
+    if (error || !data) { notify("Не удалось загрузить статистику пользователя."); return; }
+    setStatUserData(data);
+  }
   function openFolderEditor(f) {
     setFolderName(f === "new" ? "" : f.name);
     setFolderIds(new Set(f === "new" ? [] : f.chatIds));
@@ -1365,6 +1411,25 @@ export default function App() {
     "--accent-light": prefs.accent + "33",
     "--app-font": (FONTS.find((f) => f.id === prefs.font) || FONTS[0]).css,
     ...(prefs.bubbleColor ? { "--bub-out": prefs.bubbleColor } : {}),
+    ...(prefs.uiVars?.bg ? { "--bg": prefs.uiVars.bg } : {}),
+    ...(prefs.uiVars?.side ? { "--side": prefs.uiVars.side } : {}),
+    ...(prefs.uiVars?.input ? { "--input": prefs.uiVars.input } : {}),
+    ...(prefs.uiVars?.line ? { "--line": prefs.uiVars.line } : {}),
+    ...(prefs.uiVars?.hover ? { "--hover": prefs.uiVars.hover } : {}),
+  };
+  const btnIcon = (id, fallback) => {
+    const ic = (prefs.btnIcons || {})[id];
+    const anim = (prefs.btnAnim || {})[id];
+    const cls = anim && anim !== "none" ? ` anim-${anim}` : "";
+    if (ic?.type === "img") return <img src={ic.value} alt="" className={`btn-img${cls}`} />;
+    return <span className={`btn-ic${cls}`}>{ic?.value || fallback}</span>;
+  };
+  const setBtnIcon = (id, icon) => setPrefsAnd({ btnIcons: { ...(prefs.btnIcons || {}), [id]: icon } });
+  const setBtnAnim = (id, a) => setPrefsAnd({ btnAnim: { ...(prefs.btnAnim || {}), [id]: a } });
+  const resetBtn = (id) => {
+    const bi = { ...(prefs.btnIcons || {}) }; delete bi[id];
+    const ba = { ...(prefs.btnAnim || {}) }; delete ba[id];
+    setPrefsAnd({ btnIcons: bi, btnAnim: ba });
   };
   useEffect(() => {
     const link = document.querySelector("link[rel='icon']");
@@ -1513,11 +1578,11 @@ export default function App() {
       {/* ЛЕВАЯ ПАНЕЛЬ */}
       <div className="side">
         <div className="side-top">
-          <button className="icon-btn" title="Меню" onClick={() => setShowMenu(true)}>☰</button>
+          <button className="icon-btn" title="Меню" onClick={() => setShowMenu(true)}>{btnIcon("menu", "☰")}</button>
           <input className="search-input" placeholder="Найти по @тегу…" value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)} />
-          <button className="icon-btn" title="Избранное" onClick={openFavorites}>⭐</button>
-          <button className="icon-btn" title="Создать группу" onClick={() => setShowGroupNew(true)}>👥</button>
+          <button className="icon-btn" title="Избранное" onClick={openFavorites}>{btnIcon("fav", "⭐")}</button>
+          <button className="icon-btn" title="Создать группу" onClick={() => setShowGroupNew(true)}>{btnIcon("group", "👥")}</button>
         </div>
         {appSettings.announcement && (prefs.dismissedAnn || 0) < new Date(appSettings.announcement_at || 0).getTime() && (
           <div className="ann-bar" onClick={openMainChannel} title="Открыть главный канал">
@@ -1576,13 +1641,24 @@ export default function App() {
                 ? `${last.sender_id === me.id ? "Вы" : (c.is_group ? (profiles[last.sender_id]?.login || "…") : "")}${last.sender_id === me.id || c.is_group ? ": " : ""}${previewOf(last)}`
                 : c.is_group ? "Группа создана" : "Чат создан";
               return (
-                <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id} onClick={() => openChat(c.id)}
+                <div className={`chat-item${c.id === activeId ? " active" : ""}`} key={c.id}
+                  onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } openChat(c.id); }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setChatMenuFolders(false);
                     setChatMenuNotif(false);
                     setChatMenu({ x: Math.min(e.clientX, window.innerWidth - 240), y: Math.min(e.clientY, window.innerHeight - 340), chat: c });
-                  }}>
+                  }}
+                  onTouchStart={(e) => {
+                    const t = e.touches[0];
+                    lpChat.current = setTimeout(() => {
+                      suppressClick.current = true;
+                      setChatMenuFolders(false); setChatMenuNotif(false);
+                      setChatMenu({ x: Math.min(t.clientX, window.innerWidth - 240), y: Math.min(t.clientY, window.innerHeight - 340), chat: c });
+                    }, 450);
+                  }}
+                  onTouchMove={() => clearTimeout(lpChat.current)}
+                  onTouchEnd={() => clearTimeout(lpChat.current)}>
                   {c.is_group ? <GroupAvatar chat={c} /> : c.u1 === c.u2 ? <Avatar user={{ tag: "⭐", frame: "none" }} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
@@ -1611,7 +1687,7 @@ export default function App() {
           <div className="placeholder">Выберите чат</div>
         ) : (<>
           <div className="chat-head">
-            <button className="icon-btn back-btn" onClick={() => setActiveId(null)}>←</button>
+            <button className="icon-btn back-btn" onClick={() => setActiveId(null)}>{btnIcon("back", "←")}</button>
             <div onClick={() => setShowChatInfo(true)} style={{ cursor: "pointer" }}>
               {isGroup ? <GroupAvatar chat={activeChat} size="sm" /> : <Avatar user={peer} size="sm" />}
             </div>
@@ -1629,10 +1705,10 @@ export default function App() {
               </div>
             </div>
             {!isGroup && peer && peer.id !== me.id && (<>
-              <button className="icon-btn" title="Аудиозвонок" onClick={() => startCall(false)}>📞</button>
-              <button className="icon-btn" title="Видеозвонок" onClick={() => startCall(true)}>🎥</button>
+              <button className="icon-btn" title="Аудиозвонок" onClick={() => startCall(false)}>{btnIcon("call", "📞")}</button>
+              <button className="icon-btn" title="Видеозвонок" onClick={() => startCall(true)}>{btnIcon("video", "🎥")}</button>
             </>)}
-            <button className="icon-btn" title="Поиск по чату" onClick={() => setChatSearch(chatSearch === null ? "" : null)}>🔍</button>
+            <button className="icon-btn" title="Поиск по чату" onClick={() => setChatSearch(chatSearch === null ? "" : null)}>{btnIcon("search", "🔍")}</button>
           </div>
 
           {chatSearch !== null && (
@@ -1698,8 +1774,15 @@ export default function App() {
                       {Object.keys(m.reactions || {}).length > 0 && (
                         <div className="reacts">
                           {Object.entries(m.reactions).map(([e, ids]) => (
-                            <button key={e} className={`react-chip${ids.includes(me.id) ? " mine" : ""}`} onClick={() => toggleReaction(m, e)}
-                              onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); setReactViewer(m); }}>
+                            <button key={e} className={`react-chip${ids.includes(me.id) ? " mine" : ""}`}
+                              onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } toggleReaction(m, e); }}
+                              onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); setReactViewer(m); }}
+                              onTouchStart={(ev) => {
+                                ev.stopPropagation();
+                                lpChat.current = setTimeout(() => { suppressClick.current = true; setReactViewer(m); }, 450);
+                              }}
+                              onTouchMove={() => clearTimeout(lpChat.current)}
+                              onTouchEnd={() => clearTimeout(lpChat.current)}>
                               {e} {ids.length}
                             </button>
                           ))}
@@ -1756,6 +1839,7 @@ export default function App() {
               })()}
               {showEmoji && (
                 <div className="emoji-pop">
+                  <button className="pop-x" onClick={() => setShowEmoji(false)}>✕</button>
                   <div className="emoji-tabs">
                     {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
                   </div>
@@ -1772,8 +1856,8 @@ export default function App() {
                   <button onClick={startVoice}>🎤 Голосовое сообщение</button>
                 </div>
               )}
-              <button className="icon-btn" title="Прикрепить" onClick={(e) => { e.stopPropagation(); setShowAttach(!showAttach); setShowEmoji(false); }}>📎</button>
-              <button className="icon-btn" title="Эмодзи" onClick={() => { setShowEmoji(!showEmoji); setShowAttach(false); }}>😊</button>
+              <button className="icon-btn" title="Прикрепить" onClick={(e) => { e.stopPropagation(); setShowAttach(!showAttach); setShowEmoji(false); }}>{btnIcon("attach", "📎")}</button>
+              <button className="icon-btn" title="Эмодзи" onClick={() => { setShowEmoji(!showEmoji); setShowAttach(false); }}>{btnIcon("emoji", "😊")}</button>
               {recording ? (
                 <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "0 10px" }}>
                   <span style={{ color: "#E26060" }}>● Запись… {Math.round((Date.now() - recording.start) / 1000)}с</span>
@@ -1794,7 +1878,7 @@ export default function App() {
                   onKeyDown={(e) => { tickSound(); if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendText(); } }} />
               )}
               <button className="send-btn" title="Отправить" disabled={!draft.trim() && !recording}
-                onClick={() => recording ? stopVoice(true) : sendText()}>➤</button>
+                onClick={() => recording ? stopVoice(true) : sendText()}>{btnIcon("send", "➤")}</button>
             </div>
           </div>
           )}
@@ -1805,6 +1889,7 @@ export default function App() {
       {showMenu && (<>
         <div className="drawer-ov" onClick={() => setShowMenu(false)} />
         <div className="drawer">
+          <button className="icon-btn drawer-x" onClick={() => setShowMenu(false)}>✕</button>
           <div className="drawer-head">
             <div onClick={() => { setShowMenu(false); setShowProfile(true); }} style={{ cursor: "pointer", display: "inline-block" }}>
               <Avatar user={me} />
@@ -1822,6 +1907,8 @@ export default function App() {
           <button className="d-row" onClick={() => { setShowContacts(true); }}><span className="d-ic">👫</span> Контакты</button>
           <button className="d-row" onClick={() => { setShowCalls(true); }}><span className="d-ic">📞</span> Звонки</button>
           <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> Избранное</button>
+          {amAppAdmin && <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> Статистика</button>}
+          <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> Настройки</button>
           <button className="d-row" onClick={() => setPrefsAnd({ theme: prefs.theme === "light" ? "dark" : "light" })}>
             <span className="d-ic">🌙</span> Ночной режим
@@ -1935,6 +2022,7 @@ export default function App() {
           ) : chatMenu.chat.u1 !== chatMenu.chat.u2 ? (
             <button style={{ color: "#E26060" }} onClick={() => { const c = chatMenu.chat; setChatMenu(null); deleteDirectChat(c); }}>🗑 Удалить чат</button>
           ) : null}
+          <button className="menu-close" onClick={() => setChatMenu(null)}>✕ Закрыть</button>
         </div>
       )}
 
@@ -1951,6 +2039,7 @@ export default function App() {
           {menu.msg.sender_id === me.id && isGroup && <button onClick={() => { const m = menu.msg; setMenu(null); setReadersFor(m); }}>👁 Кто прочитал</button>}
           {Object.keys(menu.msg.reactions || {}).length > 0 && <button onClick={() => { const m = menu.msg; setMenu(null); setReactViewer(m); }}>👀 Кто поставил реакции</button>}
           {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
+          <button className="menu-close" onClick={() => setMenu(null)}>✕ Закрыть</button>
         </div>
       )}
 
@@ -2274,6 +2363,7 @@ export default function App() {
                     <img key={ic.id} src={ic.file} alt={ic.name} title={ic.name} className={`icon-pick${prefs.icon === ic.id ? " sel" : ""}`} onClick={() => setPrefsAnd({ icon: ic.id })} />
                   ))}
                 </div>
+                <button className="btn" style={{ marginTop: 10 }} onClick={() => { setShowProfile(false); setShowBuilder(true); }}>🎛 Конструктор интерфейса</button>
               </div>
 
               <div className="sec">
@@ -2516,9 +2606,12 @@ export default function App() {
               {call.status === "ringing"
                 ? (call.dir === "in" ? `Входящий ${call.video ? "видео" : "аудио"}звонок…` : "Звоним…")
                 : !["connected", "completed"].includes(callNet)
-                  ? "Соединяем…"
+                  ? `Соединяем… (${callNet || "старт"})`
                   : (() => { const d = Math.floor((Date.now() - call.startedAt) / 1000); return `${String(Math.floor(d / 60)).padStart(2, "0")}:${String(d % 60).padStart(2, "0")}`; })()}
             </div>
+            {!TURN_URLS.length && (
+              <div className="call-warn">⚠️ TURN не настроен: между разными сетями звук не пройдёт.<br />Переменные VITE_TURN_* в Vercel + Redeploy (ИНСТРУКЦИЯ-ЗВОНКИ.md)</div>
+            )}
           </div>
           {call.video && <video ref={localVideoRef} autoPlay playsInline muted className="call-local" />}
           <div className="call-btns">
@@ -2553,6 +2646,178 @@ export default function App() {
         aspect={crop.kind.includes("Banner") ? 4.4 : crop.kind === "wallpaper" ? 0.62 : 1}
         round={crop.kind === "me" || crop.kind === "group"}
         onCancel={() => setCrop(null)} onSave={cropDone} />}
+
+      {/* СТАТИСТИКА (только админ) */}
+      {showStats && (
+        <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowStats(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              {!statUser ? (<>
+                <h3 style={{ marginTop: 0 }}>📊 Статистика мессенджера</h3>
+                {!stats ? <p className="muted" style={{ padding: 14, textAlign: "center" }}>Загрузка…</p> : (<>
+                  <div className="stat-grid">
+                    <div className="stat-card"><b>{stats.users}</b><span>пользователей</span></div>
+                    <div className="stat-card"><b>{onlineIds.size}</b><span>сейчас онлайн</span></div>
+                    <div className="stat-card"><b>{stats.messages}</b><span>сообщений</span></div>
+                    <div className="stat-card"><b>{stats.directs}</b><span>личных чатов</span></div>
+                    <div className="stat-card"><b>{stats.groups}</b><span>групп</span></div>
+                    <div className="stat-card"><b>{stats.channels}</b><span>каналов</span></div>
+                  </div>
+                  <h3>Сообщения по дням (14 дней)</h3>
+                  <Bars data={stats.by_day} lk="d" vk="c" />
+                  <h3>Активность по часам суток (МСК)</h3>
+                  <Bars data={stats.by_hour} lk="h" vk="c" />
+                  <p className="stat">Часы активности — оценка «когда обычно онлайн» по времени отправки сообщений. Отдельный журнал входов пока не ведётся.</p>
+                  <h3>Новые пользователи (14 дней)</h3>
+                  <Bars data={stats.new_users} lk="d" vk="c" />
+                  <h3>Топ-10 по сообщениям</h3>
+                  {(stats.top_users || []).map((u, i) => (
+                    <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => loadUserStats(u)}>
+                      <span className="muted" style={{ width: 20 }}>{i + 1}.</span>
+                      <span className="mr-name"><b>{u.login}</b> <span className="muted">@{u.tag}</span></span>
+                      <span style={{ color: "var(--accent)", fontWeight: 600 }}>{u.c}</span>
+                    </div>
+                  ))}
+                  <h3>Найти пользователя</h3>
+                  <input className="field" placeholder="Поиск по @тегу или имени…" value={statQuery} onChange={(e) => setStatQuery(e.target.value)} />
+                  {(statResults || []).map((u) => (
+                    <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => loadUserStats(u)}>
+                      <Avatar user={u} size="sm" online={isOn(u)} />
+                      <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
+                    </div>
+                  ))}
+                </>)}
+                <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowStats(false)}>Закрыть</button>
+              </>) : (<>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <button className="icon-btn" onClick={() => { setStatUser(null); setStatUserData(null); }}>←</button>
+                  <h3 style={{ margin: 0 }}>Статистика: {statUser.login} <span className="muted">@{statUser.tag}</span></h3>
+                </div>
+                {!statUserData ? <p className="muted" style={{ padding: 14, textAlign: "center" }}>Загрузка…</p> : (<>
+                  <div className="stat-grid">
+                    <div className="stat-card"><b>{statUserData.total}</b><span>сообщений</span></div>
+                    <div className="stat-card"><b>{statUserData.avg_len}</b><span>симв. в среднем</span></div>
+                    <div className="stat-card"><b>{statUserData.groups}</b><span>групп/каналов</span></div>
+                    <div className="stat-card"><b>{statUser.last_seen ? new Date(statUser.last_seen).toLocaleDateString("ru-RU") : "—"}</b><span>был(а)</span></div>
+                  </div>
+                  <h3>Сообщения по дням (14 дней)</h3>
+                  <Bars data={statUserData.by_day} lk="d" vk="c" />
+                  <h3>Когда обычно активен (часы, МСК)</h3>
+                  <Bars data={statUserData.by_hour} lk="h" vk="c" />
+                  <h3>Типы сообщений</h3>
+                  {(statUserData.types || []).map((t) => (
+                    <div className="member-row" key={t.type}>
+                      <span className="mr-name">{({ text: "💬 Текст", photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файлы", voice: "🎤 Голосовые" })[t.type] || t.type}</span>
+                      <span style={{ color: "var(--accent)", fontWeight: 600 }}>{t.c}</span>
+                    </div>
+                  ))}
+                </>)}
+                <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => { setStatUser(null); setStatUserData(null); }}>← Назад к общей</button>
+              </>)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* КОНСТРУКТОР ИНТЕРФЕЙСА */}
+      <input ref={builderImgInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        const id = builderImgFor.current;
+        if (!f || !id) return;
+        try {
+          if (f.type === "image/gif") {
+            if (f.size > 300 * 1024) { notify("GIF для кнопки — до 300 КБ."); return; }
+            setBtnIcon(id, { type: "img", value: await fileToB64(f) });
+          } else {
+            setBtnIcon(id, { type: "img", value: await blobToB64(await resizeToBlob(f, 96, 0.85)) });
+          }
+        } catch { notify("Не удалось обработать картинку."); }
+      }} />
+      {showBuilder && (
+        <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowBuilder(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>🎛 Конструктор интерфейса</h3>
+
+              <p className="stat" style={{ marginTop: 0 }}>Предпросмотр — наведите или нажмите на кнопки, чтобы увидеть анимацию:</p>
+              <div className="bld-preview">
+                <div className="bp-head">
+                  <button className="icon-btn">{btnIcon("back", "←")}</button>
+                  <b style={{ fontSize: 14 }}>Аня</b>
+                  <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
+                    <button className="icon-btn">{btnIcon("call", "📞")}</button>
+                    <button className="icon-btn">{btnIcon("search", "🔍")}</button>
+                  </span>
+                </div>
+                <div className="bp-msgs">
+                  <div className="bubble in" style={{ maxWidth: "75%" }}>Привет! Как тебе новый вид? <span className="b-meta">12:00</span></div>
+                  <div className="bubble out" style={{ maxWidth: "75%", marginLeft: "auto" }}>Сейчас настрою 🎨 <span className="b-meta">12:01</span></div>
+                </div>
+                <div className="bp-comp">
+                  <button className="icon-btn">{btnIcon("attach", "📎")}</button>
+                  <button className="icon-btn">{btnIcon("emoji", "😊")}</button>
+                  <span className="bp-input muted">Сообщение</span>
+                  <button className="send-btn" style={{ width: 34, height: 34, fontSize: 14 }}>{btnIcon("send", "➤")}</button>
+                </div>
+              </div>
+
+              <div className="sec">
+                <h3>Цвета панелей</h3>
+                <div className="swatches" style={{ alignItems: "center" }}>
+                  <ColorDot value={prefs.uiVars?.bg} fallback="#17212B" title="Фон чата" onCommit={(v) => setPrefsAnd({ uiVars: { ...(prefs.uiVars || {}), bg: v } })} />
+                  <ColorDot value={prefs.uiVars?.side} fallback="#0E1621" title="Боковая панель и шапки" onCommit={(v) => setPrefsAnd({ uiVars: { ...(prefs.uiVars || {}), side: v } })} />
+                  <ColorDot value={prefs.uiVars?.input} fallback="#242F3D" title="Поля и блоки" onCommit={(v) => setPrefsAnd({ uiVars: { ...(prefs.uiVars || {}), input: v } })} />
+                  <ColorDot value={prefs.uiVars?.line} fallback="#101921" title="Линии и разделители" onCommit={(v) => setPrefsAnd({ uiVars: { ...(prefs.uiVars || {}), line: v } })} />
+                  <button className="chip" onClick={() => setPrefsAnd({ uiVars: {} })}>↺ Сбросить цвета</button>
+                </div>
+                <p className="stat">Слева направо: фон чата · панели и шапки · поля · разделители.</p>
+              </div>
+
+              <div className="sec">
+                <h3>Кнопки: эмодзи, картинки и анимации</h3>
+                {[["menu", "☰", "Меню"], ["back", "←", "Назад"], ["search", "🔍", "Поиск"], ["call", "📞", "Звонок"], ["video", "🎥", "Видеозвонок"], ["fav", "⭐", "Избранное"], ["group", "👥", "Группы"], ["attach", "📎", "Скрепка"], ["emoji", "😊", "Эмодзи"], ["send", "➤", "Отправить"]].map(([id, fb, label]) => (
+                  <div key={id} className="bld-row">
+                    <button className="icon-btn" style={{ fontSize: 18 }}>{btnIcon(id, fb)}</button>
+                    <span className="mr-name">{label}</span>
+                    <button className="chip" title="Поставить эмодзи" onClick={() => setBuilderEmoji(id)}>😀</button>
+                    <button className="chip" title="Поставить картинку или GIF" onClick={() => { builderImgFor.current = id; builderImgInp.current?.click(); }}>🖼</button>
+                    <button className="chip" title="Сбросить" onClick={() => resetBtn(id)}>↺</button>
+                    <div className="bld-anims">
+                      {[["none", "—"], ["pulse", "Пульс"], ["spin", "Вращение"], ["bounce", "Прыжок"], ["shake", "Тряска"]].map(([a, al]) => (
+                        <button key={a} className={`chip${((prefs.btnAnim || {})[id] || "none") === a ? " chip-on" : ""}`} onClick={() => setBtnAnim(id, a)}>{al}</button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <p className="stat">Анимация проигрывается при наведении мыши и при нажатии (на телефоне — при касании).</p>
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn ghost" style={{ flex: 1 }} onClick={() => setPrefsAnd({ uiVars: {}, btnIcons: {}, btnAnim: {} })}>↺ Сбросить всё</button>
+                <button className="btn" style={{ flex: 1 }} onClick={() => setShowBuilder(false)}>Готово</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ЭМОДЗИ ДЛЯ КНОПКИ */}
+      {builderEmoji && (
+        <div className="overlay" style={{ zIndex: 80 }} onClick={() => setBuilderEmoji(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>Эмодзи для кнопки</h3>
+              <div className="emoji-tabs">
+                {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
+              </div>
+              <div className="emoji-grid">
+                {EMOJI[emojiTab].map((e) => <button key={e} onClick={() => { setBtnIcon(builderEmoji, { type: "emoji", value: e }); setBuilderEmoji(null); }}>{e}</button>)}
+              </div>
+              <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setBuilderEmoji(null)}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ТОСТ */}
       {toast && (
