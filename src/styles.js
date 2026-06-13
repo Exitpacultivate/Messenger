@@ -215,6 +215,8 @@ mark { background: var(--accent); color: #fff; border-radius: 3px; padding: 0 2p
 
 .folder-tabs { display: flex; gap: 4px; padding: 0 10px 8px; overflow-x: auto; scrollbar-width: none; }
 .folder-tabs::-webkit-scrollbar { display: none; }
+.msgs, .chats, .modal { scrollbar-width: none; }
+.msgs::-webkit-scrollbar, .chats::-webkit-scrollbar, .modal::-webkit-scrollbar { width: 0; height: 0; display: none; }
 .ftab { background: none; border: none; color: var(--muted); font-size: 13.5px; font-weight: 500;
   padding: 5px 11px; border-radius: 14px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
 .ftab.on { background: var(--accent); color: #fff; }
@@ -329,4 +331,9 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
   background: var(--side); border: 1px solid var(--line); color: var(--accent); font-size: 22px;
   cursor: pointer; z-index: 6; box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
 .main { position: relative; }
+
+.market-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.market-row:last-of-type { border-bottom: none; }
+.market-prev { width: 46px; height: 46px; border-radius: 10px; flex-shrink: 0; position: relative; border: 1px solid var(--line); }
+.market-prev span { position: absolute; right: 5px; bottom: 5px; width: 14px; height: 14px; border-radius: 50%; }
 `;

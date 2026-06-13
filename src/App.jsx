@@ -264,6 +264,10 @@ export default function App() {
   const [adminTarget, setAdminTarget] = useState(null);
   const [adminChats, setAdminChats] = useState([]);
   const [showJump, setShowJump] = useState(false);
+  const [feedbackOn, setFeedbackOn] = useState(false);
+  const [showMarket, setShowMarket] = useState(false);
+  const [themes, setThemes] = useState(null);
+  const [profilePreview, setProfilePreview] = useState(false);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -511,6 +515,11 @@ export default function App() {
           if (list.some((x) => x.id === m.id)) return d;
           return { ...d, [m.chat_id]: [...list, m] };
         });
+        if (amAppAdmin && m.sender_id !== me.id) {
+          supabase.from("chats").select("is_feedback").eq("id", m.chat_id).maybeSingle().then(({ data }) => {
+            if (data?.is_feedback) { setChats((cs) => (cs.some((x) => x.id === m.chat_id) ? cs : cs)); }
+          });
+        }
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, (p) => {
         const m = p.new;
@@ -725,6 +734,8 @@ export default function App() {
       else if (mentionQuery !== null) setMentionQuery(null);
       else if (chatMenu) setChatMenu(null);
       else if (statusPick) setStatusPick(false);
+      else if (profilePreview) setProfilePreview(false);
+      else if (showMarket) setShowMarket(false);
       else if (builderEmoji) setBuilderEmoji(null);
       else if (showBuilder) setShowBuilder(false);
       else if (showStats) { if (statUser && amAppAdmin) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }
@@ -742,7 +753,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -1161,21 +1172,61 @@ export default function App() {
   }
   async function openFeedback() {
     setShowMenu(false);
-    if (amAppAdmin) { notify("Отзывы приходят вам в общий список с пометкой 📮"); return; }
-    let fb = chats.find((c) => c.is_feedback && !c.is_group && (c.u1 === me.id || c.u2 === me.id));
+    let fb = chats.find((c) => c.is_feedback);
     if (!fb) {
-      let admin = Object.values(profiles).find((x) => x.is_app_admin);
-      if (!admin) {
-        const { data } = await supabase.from("profiles").select("*").eq("is_app_admin", true).limit(1).maybeSingle();
-        admin = data; if (admin) cacheProfiles([admin]);
-      }
-      if (!admin) { notify("Администратор пока не назначен."); return; }
-      const { data, error } = await supabase.from("chats").insert({ u1: me.id, u2: admin.id, is_feedback: true }).select().single();
-      if (error) { notify(`Не удалось открыть: ${error.message}`); return; }
+      const { data } = await supabase.from("chats").select("*").eq("is_feedback", true).limit(1).maybeSingle();
+      if (!data) { notify("Чат обратной связи не настроен: выполните миграцию v12."); return; }
       fb = data;
       setChats((cs) => (cs.some((x) => x.id === fb.id) ? cs : [...cs, fb]));
     }
+    setFeedbackOn(true);
     openChat(fb.id);
+    const { data: msgs } = await supabase.from("messages").select("*").eq("chat_id", fb.id)
+      .order("created_at", { ascending: false }).limit(200);
+    setMessages((d) => ({ ...d, [fb.id]: (msgs || []).reverse() }));
+    (msgs || []).forEach((m) => ensureProfile(m.sender_id));
+  }
+  function currentThemeData() {
+    return {
+      theme: prefs.theme, accent: prefs.accent, font: prefs.font, icon: prefs.icon,
+      nickColor: prefs.nickColor, bubbleColor: prefs.bubbleColor,
+      wallpaper: prefs.wallpaper, customWallpaper: prefs.customWallpaper,
+      uiVars: prefs.uiVars, btnIcons: prefs.btnIcons, btnAnim: prefs.btnAnim, grad: prefs.grad,
+    };
+  }
+  async function openMarket() {
+    setShowMenu(false); setShowMarket(true); setThemes(null);
+    const { data, error } = await supabase.from("themes").select("*").order("downloads", { ascending: false }).limit(60);
+    if (error) { notify("Маркет недоступен: выполните миграцию v12."); setThemes([]); return; }
+    setThemes(data || []);
+  }
+  async function publishTheme() {
+    const title = window.prompt("Название вашей сборки:");
+    if (!title?.trim()) return;
+    const { error } = await supabase.from("themes").insert({
+      author: me.id, author_login: me.login, title: title.trim().slice(0, 40), data: currentThemeData(),
+    });
+    if (error) { notify(`Не удалось опубликовать: ${error.message}`); return; }
+    notify("Сборка опубликована ✓");
+    openMarket();
+  }
+  async function applyTheme(t) {
+    const d = t.data || {};
+    await setPrefsAnd({
+      theme: d.theme ?? prefs.theme, accent: d.accent ?? prefs.accent, font: d.font ?? "system",
+      icon: d.icon ?? "blue", nickColor: d.nickColor ?? null, bubbleColor: d.bubbleColor ?? null,
+      wallpaper: d.wallpaper ?? 0, customWallpaper: d.customWallpaper ?? null,
+      uiVars: d.uiVars ?? {}, btnIcons: d.btnIcons ?? {}, btnAnim: d.btnAnim ?? {}, grad: d.grad ?? {},
+    });
+    supabase.rpc("theme_downloaded", { tid: t.id }).then(() => {});
+    notify(`Тема «${t.title}» установлена ✓`);
+    setShowMarket(false);
+  }
+  async function deleteTheme(t) {
+    if (!window.confirm(`Удалить сборку «${t.title}»?`)) return;
+    const { error } = await supabase.from("themes").delete().eq("id", t.id);
+    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    setThemes((l) => (l || []).filter((x) => x.id !== t.id));
   }
   async function openAdmin() {
     setShowMenu(false); setShowAdmin(true); setAdminTarget(null); setAdminQuery(""); setAdminResults(null);
@@ -1243,6 +1294,7 @@ export default function App() {
   }
 
   function openChat(id) {
+    if (!chats.find((c) => c.id === id)?.is_feedback) setFeedbackOn(false);
     const patch = {};
     if (activeId) patch.drafts = { ...prefs.drafts, [activeId]: draft };
     if ((prefs.unreadMarks || []).includes(id)) patch.unreadMarks = prefs.unreadMarks.filter((x) => x !== id);
@@ -1473,7 +1525,7 @@ export default function App() {
     return `был(а) ${new Date(u.last_seen).toLocaleDateString("ru-RU")}`;
   };
   const chatTitle = (c) => {
-    if (c.is_feedback) return amAppAdmin ? (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…") : "Обратная связь";
+    if (c.is_feedback) return "Обратная связь";
     return c.is_group ? (c.title || "Группа") : (c.u1 === c.u2 ? "Избранное" : (profiles[c.u1 === me.id ? c.u2 : c.u1]?.login || "…"));
   };
 
@@ -1512,7 +1564,7 @@ export default function App() {
     ? { backgroundImage: `url(${o.banner_img})`, backgroundSize: "cover", backgroundPosition: "center" }
     : { background: o?.banner_color || BANNERS[o?.banner] || BANNERS[0] };
   const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
-  const sortedChats = useMemo(() => chats.filter((c) => !c.is_feedback || amAppAdmin).sort((a, b) => {
+  const sortedChats = useMemo(() => chats.filter((c) => !c.is_feedback).sort((a, b) => {
     const pa = (prefs.pinned || []).includes(a.id) ? 1 : 0;
     const pb = (prefs.pinned || []).includes(b.id) ? 1 : 0;
     if (pa !== pb) return pb - pa;
@@ -1777,18 +1829,20 @@ export default function App() {
             </div>
             <div className="ch-info" onClick={() => setShowChatInfo(true)} title={isGroup ? "Об этой группе" : "Открыть профиль"}>
               <div className="ch-name">
-                {chatTitle(activeChat)}{!isGroup && peer?.status_emoji ? ` ${peer.status_emoji}` : ""}
+                {activeChat.is_feedback ? "📮 Обратная связь" : chatTitle(activeChat)}{!isGroup && !activeChat.is_feedback && peer?.status_emoji ? ` ${peer.status_emoji}` : ""}
                 {!isGroup && <span className="muted" style={{ fontWeight: 400, fontSize: 13 }}> @{peer?.tag}</span>}
               </div>
               <div className={`ch-status${(isGroup ? typingNames.length : (isOn(peer) || typingNames.length)) ? " on" : ""}`}>
-                {typingNames.length
+                {activeChat.is_feedback
+                  ? (amAppAdmin ? "сообщения пользователей" : "пишите — администратор увидит")
+                  : typingNames.length
                   ? `${typingNames.join(", ")} печатает…`
                   : isGroup
                     ? `${activeMembers.length} ${isChannel ? "подписчиков" : "участников"}${activeMembers.filter(isOn).length ? ` · ${activeMembers.filter(isOn).length} онлайн` : ""}`
                     : activeChat.u1 === activeChat.u2 ? "ваши заметки" : lastSeenText(peer)}
               </div>
             </div>
-            {!isGroup && peer && peer.id !== me.id && (<>
+            {!isGroup && !activeChat.is_feedback && peer && peer.id !== me.id && (<>
               <button className="icon-btn" title="Аудиозвонок" onClick={() => startCall(false)}>{btnIcon("call", "📞")}</button>
               <button className="icon-btn" title="Видеозвонок" onClick={() => startCall(true)}>{btnIcon("video", "🎥")}</button>
             </>)}
@@ -1826,7 +1880,8 @@ export default function App() {
               const othersRead = Object.entries(reads[activeId] || {}).some(([uid, t]) => uid !== me.id && t >= ts);
               const url = m.type === "text" ? findUrl(m.content) : null;
               const showAsPhoto = m.type === "photo" || (m.type === "file" && isImg(m));
-              const showSender = isGroup && !isChannel && !out && (!prev || prev.sender_id !== m.sender_id);
+              const isFeed = !!activeChat?.is_feedback;
+              const showSender = (isGroup && !isChannel && !out && (!prev || prev.sender_id !== m.sender_id)) || (isFeed && amAppAdmin && !out && (!prev || prev.sender_id !== m.sender_id));
               const showAva = isGroup && !isChannel && !out && (!arr[i + 1] || arr[i + 1].sender_id !== m.sender_id);
               return (
                 <div key={m.id} ref={(el) => { if (el) msgRefs.current[m.id] = el; }}>
@@ -2005,6 +2060,7 @@ export default function App() {
           {amAppAdmin && <button className="d-row" onClick={openAdmin}><span className="d-ic">🛡</span> Админ-панель</button>}
           <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> Статистика</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
+          <button className="d-row" onClick={openMarket}><span className="d-ic">🛍</span> Маркет тем</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> Настройки</button>
           <button className="d-row" onClick={() => setPrefsAnd({ theme: prefs.theme === "light" ? "dark" : "light" })}>
             <span className="d-ic">🌙</span> Ночной режим
@@ -2397,6 +2453,7 @@ export default function App() {
             <div className="modal-pad" style={{ paddingTop: 58, background: me.profile_bg || undefined }}>
               <div style={{ fontWeight: 700, fontSize: 19, color: me.name_color || undefined }}>{me.login}</div>
               <div className="muted" style={{ fontSize: 14, marginBottom: 10 }}>@{me.tag} · нажмите на аватар, чтобы сменить</div>
+              <button className="btn ghost" style={{ marginBottom: 10 }} onClick={() => setProfilePreview(true)}>👁 Предпросмотр профиля</button>
 
               <div className="sec">
                 <h3>Профиль</h3>
@@ -2432,9 +2489,24 @@ export default function App() {
                     <button key={a} className={`chip${((prefs.grad || {}).angle || "135deg") === a ? " chip-on" : ""}`} onClick={() => setPrefsAnd({ grad: { ...(prefs.grad || {}), angle: a } })}>{l}</button>
                   ))}
                 </div>
+                <h3>Господство цветов</h3>
+                <div style={{ padding: "0 2px" }}>
+                  {[["w1", "Цвет 1"], ["w2", "Цвет 2"], ...((prefs.grad || {}).c3 ? [["w3", "Цвет 3"]] : [])].map(([wk, label]) => (
+                    <div key={wk} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <span className="muted" style={{ fontSize: 12, width: 56 }}>{label}</span>
+                      <input type="range" min={5} max={95} value={(prefs.grad || {})[wk] ?? 50}
+                        onChange={(e) => setPrefsAnd({ grad: { ...(prefs.grad || {}), [wk]: +e.target.value } })} style={{ flex: 1 }} />
+                    </div>
+                  ))}
+                </div>
                 {(() => {
                   const g = prefs.grad || {};
-                  const gcss = `linear-gradient(${g.angle || "135deg"}, ${g.c1 || "#7b2ff7"}, ${g.c2 || "#f107a3"}${g.c3 ? `, ${g.c3}` : ""})`;
+                  const a = g.angle || "135deg";
+                  const stops = [[g.c1 || "#7b2ff7", g.w1 ?? 50], [g.c2 || "#f107a3", g.w2 ?? 50], ...(g.c3 ? [[g.c3, g.w3 ?? 50]] : [])];
+                  const totalW = stops.reduce((s2, [, w]) => s2 + w, 0);
+                  let acc = 0;
+                  const parts = stops.map(([c, w]) => { const pos = (acc + w / 2) / totalW * 100; acc += w; return `${c} ${Math.round(pos)}%`; });
+                  const gcss = `linear-gradient(${a}, ${parts.join(", ")})`;
                   return (<>
                     <div style={{ height: 36, borderRadius: 10, background: gcss, margin: "6px 0 8px" }} />
                     <div style={{ display: "flex", gap: 8 }}>
@@ -2763,6 +2835,60 @@ export default function App() {
         aspect={crop.kind.includes("Banner") ? 4.4 : crop.kind === "wallpaper" ? 0.62 : 1}
         round={crop.kind === "me" || crop.kind === "group"}
         onCancel={() => setCrop(null)} onSave={cropDone} />}
+
+      {/* ПРЕДПРОСМОТР ПРОФИЛЯ (как видят другие) */}
+      {profilePreview && (
+        <div className="overlay" style={{ zIndex: 78 }} onClick={() => setProfilePreview(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="banner" style={bannerCss(me)}>
+              <Avatar user={me} size="lg" />
+            </div>
+            <div className="modal-pad" style={{ paddingTop: 58, background: me.profile_bg || undefined }}>
+              <div style={{ fontWeight: 700, fontSize: 19, color: me.name_color || undefined }}>{me.login}{me.status_emoji ? ` ${me.status_emoji}` : ""}</div>
+              <div className="muted" style={{ fontSize: 14 }}>@{me.tag} · {lastSeenText(me)}</div>
+              {me.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{me.bio}</p>}
+              <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
+              <p className="stat">Так ваш профиль видят другие пользователи.</p>
+              <button className="btn" style={{ marginTop: 8 }} onClick={() => setProfilePreview(false)}>Закрыть предпросмотр</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* МАРКЕТ ТЕМ */}
+      {showMarket && (
+        <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowMarket(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>🛍 Маркет тем</h3>
+              <button className="btn" onClick={publishTheme}>⬆ Опубликовать мою текущую тему</button>
+              <p className="stat">Публикуется ваш текущий вид: цвета, шрифт, обои, иконки кнопок и градиент.</p>
+              {themes === null ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Загрузка…</p>
+                : !themes.length ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Пока никто не выложил тему. Будьте первым!</p>
+                : themes.map((t) => {
+                  const d = t.data || {};
+                  const g = d.grad || {};
+                  const prev = d.uiVars?.side || (d.theme === "light" ? "#F5F7FA" : "#0E1621");
+                  const grad = g.c1 ? `linear-gradient(135deg, ${g.c1}, ${g.c2 || g.c1}${g.c3 ? `, ${g.c3}` : ""})` : null;
+                  return (
+                    <div className="market-row" key={t.id}>
+                      <div className="market-prev" style={{ background: grad || prev }}>
+                        <span style={{ background: d.accent || "#5AABF0" }} />
+                      </div>
+                      <div className="mr-name" style={{ flex: 1 }}>
+                        <b>{t.title}</b>
+                        <div className="muted" style={{ fontSize: 12 }}>от {t.author_login || "?"} · ⬇ {t.downloads}</div>
+                      </div>
+                      <button className="chip" onClick={() => applyTheme(t)}>Установить</button>
+                      {(t.author === me.id || amAppAdmin) && <button className="icon-btn" style={{ color: "#E26060" }} onClick={() => deleteTheme(t)}>🗑</button>}
+                    </div>
+                  );
+                })}
+              <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowMarket(false)}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* АДМИН-ПАНЕЛЬ */}
       {showAdmin && (
