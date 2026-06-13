@@ -336,4 +336,27 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
 .market-row:last-of-type { border-bottom: none; }
 .market-prev { width: 46px; height: 46px; border-radius: 10px; flex-shrink: 0; position: relative; border: 1px solid var(--line); }
 .market-prev span { position: absolute; right: 5px; bottom: 5px; width: 14px; height: 14px; border-radius: 50%; }
+
+.market-app { max-width: 460px; }
+.market-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.theme-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.theme-card { background: var(--input); border-radius: 14px; overflow: hidden; cursor: pointer; transition: transform 0.12s; }
+.theme-card:active { transform: scale(0.97); }
+.tc-cover { position: relative; aspect-ratio: 16/10; background: var(--side); }
+.tc-cover img, .tc-cover video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tc-plat { position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,0.55); color: #fff;
+  font-size: 10.5px; padding: 2px 7px; border-radius: 8px; backdrop-filter: blur(4px); }
+.tc-info { padding: 8px 10px; }
+.tc-info b { font-size: 14px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.theme-gallery { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; scroll-snap-type: x mandatory; }
+.theme-gallery img, .theme-gallery video { height: 230px; border-radius: 12px; scroll-snap-align: center; cursor: pointer; }
+.plat-chip { display: inline-block; background: var(--input); border-radius: 10px; padding: 4px 10px; font-size: 13px; }
+.pub-media { position: relative; }
+.pub-media img, .pub-media video { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+.cover-badge { position: absolute; bottom: 4px; left: 4px; background: var(--accent); color: #fff;
+  font-size: 10px; padding: 1px 6px; border-radius: 6px; }
+.pm-del { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; border-radius: 50%;
+  border: none; background: rgba(0,0,0,0.6); color: #fff; cursor: pointer; font-size: 12px; }
+.pub-add { aspect-ratio: 1; border: 2px dashed var(--line); background: none; border-radius: 8px;
+  color: var(--muted); font-size: 26px; cursor: pointer; }
 `;

@@ -268,6 +268,10 @@ export default function App() {
   const [showMarket, setShowMarket] = useState(false);
   const [themes, setThemes] = useState(null);
   const [profilePreview, setProfilePreview] = useState(false);
+  const [marketTab, setMarketTab] = useState("all"); // all | pc | mobile
+  const [marketQuery, setMarketQuery] = useState("");
+  const [themeOpen, setThemeOpen] = useState(null);
+  const [publishForm, setPublishForm] = useState(null); // { title, description, platform, tags, media }
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -297,6 +301,7 @@ export default function App() {
   const suppressClick = useRef(false);
   const builderImgFor = useRef(null);
   const builderImgInp = useRef(null);
+  const themeMediaInp = useRef(null);
   const originalRef = useRef(false);
   const msgRefs = useRef({});
   const meBannerInp = useRef(null);
@@ -735,6 +740,8 @@ export default function App() {
       else if (chatMenu) setChatMenu(null);
       else if (statusPick) setStatusPick(false);
       else if (profilePreview) setProfilePreview(false);
+      else if (publishForm) setPublishForm(null);
+      else if (themeOpen) setThemeOpen(null);
       else if (showMarket) setShowMarket(false);
       else if (builderEmoji) setBuilderEmoji(null);
       else if (showBuilder) setShowBuilder(false);
@@ -753,7 +760,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -1195,20 +1202,52 @@ export default function App() {
     };
   }
   async function openMarket() {
-    setShowMenu(false); setShowMarket(true); setThemes(null);
-    const { data, error } = await supabase.from("themes").select("*").order("downloads", { ascending: false }).limit(60);
-    if (error) { notify("Маркет недоступен: выполните миграцию v12."); setThemes([]); return; }
+    setShowMenu(false); setShowMarket(true); setThemeOpen(null); setPublishForm(null); setThemes(null);
+    const { data, error } = await supabase.from("themes").select("*").order("downloads", { ascending: false }).limit(100);
+    if (error) { notify("Маркет недоступен: выполните миграции v12 и v13."); setThemes([]); return; }
     setThemes(data || []);
   }
-  async function publishTheme() {
-    const title = window.prompt("Название вашей сборки:");
-    if (!title?.trim()) return;
+  function startPublish() {
+    setPublishForm({ title: "", description: "", platform: "both", tags: "", media: [] });
+  }
+  async function addThemeMedia(file) {
+    if (!file) return;
+    try {
+      let item;
+      if (file.type.startsWith("video/")) {
+        if (file.size > 25 * 1048576) { notify("Видео до 25 МБ."); return; }
+        item = { type: "video", url: await uploadMedia(file, extOf(file.name, "mp4"), file.type || "video/mp4") };
+      } else if (file.type.startsWith("image/")) {
+        const url = file.type === "image/gif"
+          ? await uploadMedia(file, "gif", "image/gif")
+          : await uploadMedia(await resizeToBlob(file, 1280, 0.82), "jpg", "image/jpeg");
+        item = { type: "image", url };
+      } else { notify("Только фото или видео."); return; }
+      setPublishForm((f) => ({ ...f, media: [...f.media, item] }));
+    } catch { notify("Не удалось загрузить медиа."); }
+  }
+  async function submitPublish() {
+    const f = publishForm;
+    if (!f.title.trim()) { notify("Укажите название сборки."); return; }
+    const tags = f.tags.split(/[,\s]+/).map((t) => t.replace(/^#/, "").trim()).filter(Boolean).slice(0, 8);
     const { error } = await supabase.from("themes").insert({
-      author: me.id, author_login: me.login, title: title.trim().slice(0, 40), data: currentThemeData(),
+      author: me.id, author_login: me.login, title: f.title.trim().slice(0, 40),
+      description: f.description.trim().slice(0, 300), platform: f.platform, tags,
+      media: f.media, data: currentThemeData(),
     });
     if (error) { notify(`Не удалось опубликовать: ${error.message}`); return; }
     notify("Сборка опубликована ✓");
+    setPublishForm(null);
     openMarket();
+  }
+  async function openAuthor(t) {
+    let u = profiles[t.author];
+    if (!u) {
+      const { data } = await supabase.from("profiles").select("*").eq("id", t.author).maybeSingle();
+      u = data; if (u) cacheProfiles([u]);
+    }
+    if (u) { setShowMarket(false); setThemeOpen(null); setShowMember(u); }
+    else notify("Автор не найден.");
   }
   async function applyTheme(t) {
     const d = t.data || {};
@@ -1219,15 +1258,18 @@ export default function App() {
       uiVars: d.uiVars ?? {}, btnIcons: d.btnIcons ?? {}, btnAnim: d.btnAnim ?? {}, grad: d.grad ?? {},
     });
     supabase.rpc("theme_downloaded", { tid: t.id }).then(() => {});
+    setThemes((l) => (l || []).map((x) => x.id === t.id ? { ...x, downloads: x.downloads + 1 } : x));
     notify(`Тема «${t.title}» установлена ✓`);
-    setShowMarket(false);
+    setShowMarket(false); setThemeOpen(null);
   }
   async function deleteTheme(t) {
     if (!window.confirm(`Удалить сборку «${t.title}»?`)) return;
     const { error } = await supabase.from("themes").delete().eq("id", t.id);
     if (error) { notify(`Не удалось: ${error.message}`); return; }
     setThemes((l) => (l || []).filter((x) => x.id !== t.id));
+    setThemeOpen(null);
   }
+  const platLabel = { pc: "💻 ПК", mobile: "📱 Телефон", both: "💻📱 Все" };
   async function openAdmin() {
     setShowMenu(false); setShowAdmin(true); setAdminTarget(null); setAdminQuery(""); setAdminResults(null);
     const { data } = await supabase.rpc("admin_list_chats");
@@ -2855,42 +2897,137 @@ export default function App() {
         </div>
       )}
 
-      {/* МАРКЕТ ТЕМ */}
+      {/* МАРКЕТ ТЕМ — мини-приложение */}
+      <input ref={themeMediaInp} type="file" accept="image/*,video/*" hidden
+        onChange={(e) => { addThemeMedia(e.target.files[0]); e.target.value = ""; }} />
       {showMarket && (
         <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowMarket(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-pad">
-              <h3 style={{ marginTop: 0 }}>🛍 Маркет тем</h3>
-              <button className="btn" onClick={publishTheme}>⬆ Опубликовать мою текущую тему</button>
-              <p className="stat">Публикуется ваш текущий вид: цвета, шрифт, обои, иконки кнопок и градиент.</p>
-              {themes === null ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Загрузка…</p>
-                : !themes.length ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Пока никто не выложил тему. Будьте первым!</p>
-                : themes.map((t) => {
-                  const d = t.data || {};
-                  const g = d.grad || {};
-                  const prev = d.uiVars?.side || (d.theme === "light" ? "#F5F7FA" : "#0E1621");
-                  const grad = g.c1 ? `linear-gradient(135deg, ${g.c1}, ${g.c2 || g.c1}${g.c3 ? `, ${g.c3}` : ""})` : null;
-                  return (
-                    <div className="market-row" key={t.id}>
-                      <div className="market-prev" style={{ background: grad || prev }}>
-                        <span style={{ background: d.accent || "#5AABF0" }} />
-                      </div>
-                      <div className="mr-name" style={{ flex: 1 }}>
-                        <b>{t.title}</b>
-                        <div className="muted" style={{ fontSize: 12 }}>от {t.author_login || "?"} · ⬇ {t.downloads}</div>
-                      </div>
-                      <button className="chip" onClick={() => applyTheme(t)}>Установить</button>
-                      {(t.author === me.id || amAppAdmin) && <button className="icon-btn" style={{ color: "#E26060" }} onClick={() => deleteTheme(t)}>🗑</button>}
+          <div className="modal market-app" onClick={(e) => e.stopPropagation()}>
+
+            {/* === Публикация === */}
+            {publishForm ? (
+              <div className="modal-pad">
+                <div className="market-head">
+                  <button className="icon-btn" onClick={() => setPublishForm(null)}>←</button>
+                  <h3 style={{ margin: 0 }}>Новая сборка</h3>
+                </div>
+                <input className="field" placeholder="Название" maxLength={40}
+                  value={publishForm.title} onChange={(e) => setPublishForm((f) => ({ ...f, title: e.target.value }))} />
+                <textarea className="field" placeholder="Описание сборки" maxLength={300} rows={3}
+                  value={publishForm.description} onChange={(e) => setPublishForm((f) => ({ ...f, description: e.target.value }))} />
+                <h3>Для какой платформы</h3>
+                <div className="theme-row">
+                  {[["both", "💻📱 Все"], ["pc", "💻 ПК"], ["mobile", "📱 Телефон"]].map(([v, l]) => (
+                    <button key={v} className={`btn${publishForm.platform === v ? "" : " ghost"}`} style={{ padding: "8px 4px", fontSize: 13 }}
+                      onClick={() => setPublishForm((f) => ({ ...f, platform: v }))}>{l}</button>
+                  ))}
+                </div>
+                <input className="field" placeholder="Теги через запятую: тёмная, неон, минимализм"
+                  value={publishForm.tags} onChange={(e) => setPublishForm((f) => ({ ...f, tags: e.target.value }))} />
+                <h3>Фото и видео <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>(первое — обложка)</span></h3>
+                <div className="media-grid">
+                  {publishForm.media.map((m, idx) => (
+                    <div key={idx} className="pub-media">
+                      {m.type === "video" ? <video src={m.url} /> : <img src={m.url} alt="" />}
+                      {idx === 0 && <span className="cover-badge">обложка</span>}
+                      <button className="pm-del" onClick={() => setPublishForm((f) => ({ ...f, media: f.media.filter((_, k) => k !== idx) }))}>✕</button>
                     </div>
-                  );
-                })}
-              <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowMarket(false)}>Закрыть</button>
-            </div>
+                  ))}
+                  <button className="pub-add" onClick={() => themeMediaInp.current?.click()}>＋</button>
+                </div>
+                <p className="stat">Публикуется ваш текущий вид мессенджера: цвета, шрифт, обои, иконки кнопок и градиент.</p>
+                <button className="btn" onClick={submitPublish}>Опубликовать сборку</button>
+                <button className="btn ghost" onClick={() => setPublishForm(null)}>Отмена</button>
+              </div>
+
+            /* === Страница темы === */
+            ) : themeOpen ? (() => {
+              const t = themeOpen;
+              const media = t.media || [];
+              return (
+                <div className="modal-pad">
+                  <div className="market-head">
+                    <button className="icon-btn" onClick={() => setThemeOpen(null)}>←</button>
+                    <h3 style={{ margin: 0, flex: 1 }}>{t.title}</h3>
+                    {(t.author === me.id || amAppAdmin) && <button className="icon-btn" style={{ color: "#E26060" }} onClick={() => deleteTheme(t)}>🗑</button>}
+                  </div>
+                  {media.length > 0 && (
+                    <div className="theme-gallery">
+                      {media.map((m, idx) => m.type === "video"
+                        ? <video key={idx} src={m.url} controls playsInline />
+                        : <img key={idx} src={m.url} alt="" onClick={() => setViewer(m.url)} />)}
+                    </div>
+                  )}
+                  <div className="member-row" style={{ cursor: "pointer", padding: "8px 0" }} onClick={() => openAuthor(t)}>
+                    <Avatar user={profiles[t.author] || { tag: t.author_login || "?" }} size="sm" />
+                    <span className="mr-name">от <b>{t.author_login || "?"}</b><div className="muted" style={{ fontSize: 12 }}>открыть профиль →</div></span>
+                    <span className="muted">⬇ {t.downloads}</span>
+                  </div>
+                  <span className="plat-chip">{platLabel[t.platform] || platLabel.both}</span>
+                  {t.description && <p style={{ fontSize: 14.5, lineHeight: 1.45, marginTop: 10 }}>{t.description}</p>}
+                  {(t.tags || []).length > 0 && (
+                    <div className="quick-chips" style={{ marginTop: 8 }}>
+                      {t.tags.map((tg) => <span key={tg} className="chip" style={{ cursor: "default" }}>#{tg}</span>)}
+                    </div>
+                  )}
+                  <button className="btn" style={{ marginTop: 14 }} onClick={() => applyTheme(t)}>⬇ Установить тему</button>
+                </div>
+              );
+            })()
+
+            /* === Витрина === */
+            : (
+              <div className="modal-pad">
+                <div className="market-head">
+                  <h3 style={{ margin: 0, flex: 1 }}>🛍 Маркет тем</h3>
+                  <button className="chip chip-on" onClick={startPublish}>＋ Выложить</button>
+                </div>
+                <div className="folder-tabs" style={{ padding: "0 0 8px" }}>
+                  {[["all", "Все"], ["pc", "💻 ПК"], ["mobile", "📱 Телефон"]].map(([v, l]) => (
+                    <button key={v} className={`ftab${marketTab === v ? " on" : ""}`} onClick={() => setMarketTab(v)}>{l}</button>
+                  ))}
+                </div>
+                <input className="field" placeholder="Поиск по названию и тегам…" value={marketQuery} onChange={(e) => setMarketQuery(e.target.value)} />
+                {themes === null ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Загрузка…</p>
+                  : (() => {
+                    const q = marketQuery.trim().toLowerCase();
+                    const list = (themes || []).filter((t) =>
+                      (marketTab === "all" || t.platform === marketTab || t.platform === "both")
+                      && (!q || t.title.toLowerCase().includes(q) || (t.tags || []).some((tg) => tg.toLowerCase().includes(q))));
+                    if (!list.length) return <p className="muted" style={{ textAlign: "center", padding: 14 }}>Ничего не найдено. Будьте первым — нажмите «Выложить»!</p>;
+                    return (
+                      <div className="theme-cards">
+                        {list.map((t) => {
+                          const cover = (t.media || [])[0];
+                          const d = t.data || {};
+                          const g = d.grad || {};
+                          const fallback = g.c1 ? `linear-gradient(135deg, ${g.c1}, ${g.c2 || g.c1}${g.c3 ? `, ${g.c3}` : ""})` : (d.uiVars?.side || (d.theme === "light" ? "#F5F7FA" : "#0E1621"));
+                          return (
+                            <div className="theme-card" key={t.id} onClick={() => setThemeOpen(t)}>
+                              <div className="tc-cover" style={cover ? {} : { background: fallback }}>
+                                {cover && (cover.type === "video"
+                                  ? <video src={cover.url} muted />
+                                  : <img src={cover.url} alt="" />)}
+                                <span className="tc-plat">{platLabel[t.platform] || platLabel.both}</span>
+                              </div>
+                              <div className="tc-info">
+                                <b>{t.title}</b>
+                                <div className="muted" style={{ fontSize: 12 }}>{t.author_login || "?"} · ⬇ {t.downloads}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowMarket(false)}>Закрыть</button>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* АДМИН-ПАНЕЛЬ */}
+      {/* АДМИН-ПАНЕЛЬ */}      {/* АДМИН-ПАНЕЛЬ */}
       {showAdmin && (
         <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowAdmin(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
