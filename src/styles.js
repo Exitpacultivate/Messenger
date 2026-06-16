@@ -359,4 +359,21 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
   border: none; background: rgba(0,0,0,0.6); color: #fff; cursor: pointer; font-size: 12px; }
 .pub-add { aspect-ratio: 1; border: 2px dashed var(--line); background: none; border-radius: 8px;
   color: var(--muted); font-size: 26px; cursor: pointer; }
+
+.modal.fullscreen { max-width: 720px; width: 96vw; height: 92vh; max-height: 92vh; display: flex; flex-direction: column; }
+.modal.fullscreen .modal-pad { flex: 1; overflow-y: auto; }
+@media (max-width: 720px) { .modal.fullscreen { width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; } }
+.modal.fullscreen .theme-cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.call-diag { position: relative; z-index: 2; margin-top: 10px; font-size: 11px; color: rgba(255,255,255,0.6);
+  text-align: center; max-width: 340px; line-height: 1.5; }
+
+.sticker-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 8px; max-height: 240px; overflow-y: auto; }
+.sticker-cell { position: relative; }
+.sticker-cell img { width: 100%; aspect-ratio: 1; object-fit: contain; cursor: pointer; border-radius: 8px; }
+.sticker-cell img:active { transform: scale(0.9); }
+.st-del { position: absolute; top: 0; right: 0; width: 18px; height: 18px; border-radius: 50%; border: none;
+  background: rgba(0,0,0,0.6); color: #fff; font-size: 10px; cursor: pointer; opacity: 0; }
+.sticker-cell:hover .st-del { opacity: 1; }
+.sticker-add { aspect-ratio: 1; border: 2px dashed var(--line); background: none; border-radius: 8px;
+  color: var(--muted); font-size: 24px; cursor: pointer; }
 `;

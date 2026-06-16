@@ -3,6 +3,7 @@ import { supabase, configured } from "./supabase.js";
 import { css } from "./styles.js";
 import { ACCENTS, WALLPAPERS, BANNERS, FRAMES, EMOJI, REACTIONS } from "./constants.js";
 import { fmtTime, fmtDay, fmtSize, findUrl, isImg, resizeImage, resizeToBlob, fileToB64, loadPrefs, storePrefs } from "./helpers.js";
+import { LANGS, makeT } from "./i18n.js";
 
 const EMAIL_DOMAIN = "msgr.example.com";
 const FONTS = [
@@ -89,17 +90,20 @@ function VoiceBubble({ msg }) {
 function ColorDot({ value, fallback = "#5AABF0", title, onCommit }) {
   const [v, setV] = useState(value || fallback);
   const tRef = useRef(null);
+  const inpRef = useRef(null);
   useEffect(() => { if (value) setV(value); }, [value]);
   return (
     <label className={`sw${value ? "" : " sw-pick"}`} title={title}
-      style={{ position: "relative", overflow: "hidden", ...(value ? { background: v } : {}) }}>
+      style={{ position: "relative", overflow: "hidden", ...(value ? { background: v } : {}) }}
+      onClick={() => inpRef.current?.click()}>
       {!value && <span className="pick-plus">＋</span>}
-      <input type="color" value={v} style={{ opacity: 0, position: "absolute", inset: 0, cursor: "pointer" }}
+      <input ref={inpRef} type="color" value={v}
+        style={{ opacity: 0, position: "absolute", inset: 0, width: "100%", height: "100%", cursor: "pointer", border: 0, padding: 0 }}
         onChange={(e) => {
           const nv = e.target.value;
           setV(nv);
           clearTimeout(tRef.current);
-          tRef.current = setTimeout(() => onCommit(nv), 350);
+          tRef.current = setTimeout(() => onCommit(nv), 300);
         }} />
     </label>
   );
@@ -207,7 +211,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, uiVars: {}, btnIcons: {}, btnAnim: {}, ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, uiVars: {}, btnIcons: {}, btnAnim: {}, lang: "ru", stickers: [], chatPins: {}, ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -240,6 +244,7 @@ export default function App() {
   const [callMuted, setCallMuted] = useState(false);
   const [callCamOff, setCallCamOff] = useState(false);
   const [callNet, setCallNet] = useState("");
+  const [callDiag, setCallDiag] = useState({ ice: "", gather: "", cands: 0, relay: 0, turn: TURN_URLS.length });
   const [, setCallTick] = useState(0);
   const [showMenu, setShowMenu] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
@@ -272,6 +277,11 @@ export default function App() {
   const [marketQuery, setMarketQuery] = useState("");
   const [themeOpen, setThemeOpen] = useState(null);
   const [publishForm, setPublishForm] = useState(null); // { title, description, platform, tags, media }
+  const [showStickers, setShowStickers] = useState(false);
+  const [expireSec, setExpireSec] = useState(0);
+  const [lockedOpen, setLockedOpen] = useState(null); // chatId, для которого спрашиваем пин
+  const [pinInput, setPinInput] = useState("");
+  const [unlocked, setUnlocked] = useState({}); // chatId -> true в текущей сессии
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -302,6 +312,7 @@ export default function App() {
   const builderImgFor = useRef(null);
   const builderImgInp = useRef(null);
   const themeMediaInp = useRef(null);
+  const stickerInp = useRef(null);
   const originalRef = useRef(false);
   const msgRefs = useRef({});
   const meBannerInp = useRef(null);
@@ -329,6 +340,7 @@ export default function App() {
 
   prefsRef.current = prefs;
   chatsRef.current = chats;
+  const t = useMemo(() => makeT(prefs.lang || "ru"), [prefs.lang]);
   const meTagRef = useRef(null);
   const meLoginRef = useRef(null);
   meTagRef.current = me?.tag;
@@ -507,6 +519,19 @@ export default function App() {
         ensureProfile(m.sender_id);
         if (m.sender_id !== me.id) {
           const pr = prefsRef.current || {};
+          // автоответчик: только в личке, не чаще раза в 5 минут на чат
+          if (me.auto_reply && m.type === "text") {
+            supabase.from("chats").select("is_group,is_feedback").eq("id", m.chat_id).maybeSingle().then(({ data }) => {
+              if (data && !data.is_group && !data.is_feedback) {
+                const key = "ar_" + m.chat_id;
+                const last = +(sessionStorage.getItem(key) || 0);
+                if (Date.now() - last > 300000) {
+                  sessionStorage.setItem(key, Date.now());
+                  supabase.from("messages").insert({ chat_id: m.chat_id, sender_id: me.id, type: "text", content: "🤖 " + me.auto_reply, reactions: {} }).then(() => {});
+                }
+              }
+            });
+          }
           const mode = (pr.notifMode || {})[m.chat_id] || ((pr.muted || []).includes(m.chat_id) ? "none" : "all");
           const mentioned = (m.type === "text" && meTagRef.current && new RegExp(`@${meTagRef.current}\\b`, "i").test(m.content))
             || (m.reply_to && m.reply_to.name && m.reply_to.name === meLoginRef.current);
@@ -672,10 +697,10 @@ export default function App() {
     ch.on("presence", { event: "sync" }, () => {
       setOnlineIds(new Set(Object.keys(ch.presenceState())));
     }).subscribe(async (status) => {
-      if (status === "SUBSCRIBED") await ch.track({ at: Date.now() });
+      if (status === "SUBSCRIBED" && !me.hide_online) await ch.track({ at: Date.now() });
     });
     const beat = setInterval(() => {
-      supabase.from("profiles").update({ last_seen: new Date().toISOString() }).eq("id", me.id).then(() => {});
+      if (!me.hide_online) supabase.from("profiles").update({ last_seen: new Date().toISOString() }).eq("id", me.id).then(() => {});
     }, 120000);
     return () => { clearInterval(beat); supabase.removeChannel(ch); };
   }, [phase, me?.id]);
@@ -711,7 +736,7 @@ export default function App() {
     const lastIncoming = [...activeMsgs].reverse().find((m) => m.sender_id !== me.id);
     if (!lastIncoming) return;
     const myRead = reads[activeId]?.[me.id] || 0;
-    if (myRead < new Date(lastIncoming.created_at).getTime()) {
+    if (myRead < new Date(lastIncoming.created_at).getTime() && !me.hide_read) {
       supabase.from("chat_reads").upsert({ chat_id: activeId, user_id: me.id, read_at: new Date().toISOString() }).then(() => {});
       setReads((d) => ({ ...d, [activeId]: { ...(d[activeId] || {}), [me.id]: Date.now() } }));
     }
@@ -738,6 +763,7 @@ export default function App() {
       if (menu) setMenu(null);
       else if (mentionQuery !== null) setMentionQuery(null);
       else if (chatMenu) setChatMenu(null);
+      else if (showStickers) setShowStickers(false);
       else if (statusPick) setStatusPick(false);
       else if (profilePreview) setProfilePreview(false);
       else if (publishForm) setPublishForm(null);
@@ -760,7 +786,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -943,6 +969,23 @@ export default function App() {
     setChats((cs) => cs.filter((c) => c.id !== id));
     if (activeId === id) setActiveId(null);
   }
+  function setChatPin(id) {
+    const cur = (prefs.chatPins || {})[id];
+    if (cur) {
+      if (window.confirm("Снять пин-код с этого чата?")) {
+        const next = { ...(prefs.chatPins || {}) }; delete next[id];
+        setPrefsAnd({ chatPins: next });
+        notify("Пин-код снят");
+      }
+      return;
+    }
+    const pin = window.prompt("Задайте пин-код для чата (4–6 цифр):");
+    if (!pin) return;
+    if (!/^[0-9]{4,6}$/.test(pin)) { notify("Пин-код — 4–6 цифр."); return; }
+    setPrefsAnd({ chatPins: { ...(prefs.chatPins || {}), [id]: pin } });
+    setUnlocked((u) => ({ ...u, [id]: true }));
+    notify("Чат защищён пин-кодом 🔒");
+  }
   const inList = (key, id) => (prefs[key] || []).includes(id);
   const toggleList = (key, id) => setPrefsAnd({ [key]: inList(key, id) ? prefs[key].filter((x) => x !== id) : [...(prefs[key] || []), id] });
   async function clearHistory(c) {
@@ -1029,17 +1072,25 @@ export default function App() {
   }
   function newPC(peerId) {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    pc.onicecandidate = (e) => { if (e.candidate) signal(peerId, "candidate", { candidate: e.candidate.toJSON() }); };
-    pc.ontrack = (e) => {
-      remoteStreamRef.current = e.streams[0];
-      attachStreams();
+    setCallDiag({ ice: "new", gather: "new", cands: 0, relay: 0, turn: TURN_URLS.length });
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        signal(peerId, "candidate", { candidate: e.candidate.toJSON() });
+        const isRelay = (e.candidate.candidate || "").includes(" typ relay");
+        setCallDiag((d) => ({ ...d, cands: d.cands + 1, relay: d.relay + (isRelay ? 1 : 0) }));
+        console.log("[звонок] кандидат:", e.candidate.type, e.candidate.candidate);
+      }
     };
+    pc.ontrack = (e) => { remoteStreamRef.current = e.streams[0]; attachStreams(); };
     console.log("[звонок] ICE-серверы:", ICE_SERVERS);
-    pc.oniceconnectionstatechange = () => console.log("[звонок] ICE:", pc.iceConnectionState);
+    pc.onicegatheringstatechange = () => setCallDiag((d) => ({ ...d, gather: pc.iceGatheringState }));
+    pc.oniceconnectionstatechange = () => {
+      console.log("[звонок] ICE:", pc.iceConnectionState);
+      setCallDiag((d) => ({ ...d, ice: pc.iceConnectionState }));
+    };
     pc.onconnectionstatechange = () => {
       console.log("[звонок] соединение:", pc.connectionState);
       setCallNet(pc.connectionState);
-      if (pc.connectionState === "failed") notify("Медиа-соединение не установилось — нужен TURN-сервер. Откройте ИНСТРУКЦИЯ-ЗВОНКИ.md в репозитории.");
       if (["failed", "disconnected", "closed"].includes(pc.connectionState)) endCall(false);
     };
     pcRef.current = pc;
@@ -1193,6 +1244,19 @@ export default function App() {
     setMessages((d) => ({ ...d, [fb.id]: (msgs || []).reverse() }));
     (msgs || []).forEach((m) => ensureProfile(m.sender_id));
   }
+  async function addSticker(file) {
+    if (!file) return;
+    try {
+      const url = file.type === "image/gif"
+        ? await uploadMedia(file, "gif", "image/gif")
+        : await uploadMedia(await resizeToBlob(file, 320, 0.85), "png", "image/png");
+      setPrefsAnd({ stickers: [...(prefs.stickers || []), url].slice(-60) });
+    } catch { notify("Не удалось добавить стикер."); }
+  }
+  function sendSticker(url) {
+    setShowStickers(false);
+    sendMessage({ type: "photo", content: url, file_name: "sticker.png" });
+  }
   function currentThemeData() {
     return {
       theme: prefs.theme, accent: prefs.accent, font: prefs.font, icon: prefs.icon,
@@ -1335,7 +1399,21 @@ export default function App() {
     } catch { notify("Не удалось сохранить изображение."); }
   }
 
+  function openChatUnlocked(id) {
+    supabase.rpc("purge_expired").then(() => {});
+    if (!chats.find((c) => c.id === id)?.is_feedback) setFeedbackOn(false);
+    const patch = {};
+    if (activeId) patch.drafts = { ...prefs.drafts, [activeId]: draft };
+    if ((prefs.unreadMarks || []).includes(id)) patch.unreadMarks = prefs.unreadMarks.filter((x) => x !== id);
+    if (Object.keys(patch).length) setPrefsAnd(patch);
+    setActiveId(id);
+    setDraft(prefs.drafts?.[id] || "");
+    setReplyTo(null); setChatSearch(null); setShowEmoji(false); setShowAttach(false); setShowChatInfo(false); setMentionQuery(null);
+  }
   function openChat(id) {
+    const pin = (prefs.chatPins || {})[id];
+    if (pin && !unlocked[id]) { setLockedOpen(id); setPinInput(""); return; }
+    supabase.rpc("purge_expired").then(() => {});
     if (!chats.find((c) => c.id === id)?.is_feedback) setFeedbackOn(false);
     const patch = {};
     if (activeId) patch.drafts = { ...prefs.drafts, [activeId]: draft };
@@ -1356,6 +1434,7 @@ export default function App() {
     const row = {
       chat_id: activeId, sender_id: me.id, reactions: {},
       reply_to: replyTo ? { id: replyTo.id, name: senderName(replyTo), text: previewOf(replyTo) } : null,
+      ...(expireSec ? { expires_at: new Date(Date.now() + expireSec * 1000).toISOString() } : {}),
       ...payload,
     };
     setReplyTo(null);
@@ -1559,6 +1638,7 @@ export default function App() {
   };
   const isOn = (u) => onlineIds.has(u?.id);
   const lastSeenText = (u) => {
+    if (u?.hide_online) return "был(а) недавно";
     if (isOn(u)) return "онлайн";
     if (!u?.last_seen) return "был(а) недавно";
     const d = Date.now() - new Date(u.last_seen).getTime();
@@ -1814,8 +1894,9 @@ export default function App() {
             folderChats.map((c) => {
               const p = c.is_group ? null : profiles[c.u1 === me.id ? c.u2 : c.u1];
               const last = lastMsgOf(c);
+              const lockedPreview = (prefs.chatPins || {})[c.id] && !unlocked[c.id];
               const n = unreadCount(c);
-              const lastLabel = last
+              const lastLabel = lockedPreview ? "🔒 Защищено пин-кодом" : last
                 ? `${last.sender_id === me.id ? "Вы" : (c.is_group ? (profiles[last.sender_id]?.login || "…") : "")}${last.sender_id === me.id || c.is_group ? ": " : ""}${previewOf(last)}`
                 : c.is_group ? "Группа создана" : "Чат создан";
               return (
@@ -1840,7 +1921,7 @@ export default function App() {
                   {c.is_group ? <GroupAvatar chat={c} /> : c.u1 === c.u2 ? <Avatar user={{ tag: "⭐", frame: "none" }} /> : <Avatar user={p} online={isOn(p)} />}
                   <div className="ci-body">
                     <div className="ci-row">
-                      <span className="ci-name">{c.is_feedback ? "📮 " : c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{notifModeOf(c.id) === "none" ? " 🔕" : notifModeOf(c.id) === "mentions" ? " ＠" : ""}</span>
+                      <span className="ci-name">{(prefs.chatPins || {})[c.id] && "🔒 "}{c.is_feedback ? "📮 " : c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}{notifModeOf(c.id) === "none" ? " 🔕" : notifModeOf(c.id) === "mentions" ? " ＠" : ""}</span>
                       <span className="ci-time">{(prefs.pinned || []).includes(c.id) && "📌 "}{last ? fmtTime(last.created_at) : ""}</span>
                     </div>
                     <div className="ci-row">
@@ -2010,6 +2091,12 @@ export default function App() {
                 {prefs.quickReplies.map((q, i) => <button key={i} className="chip" title="Отправить сразу" onClick={() => sendText(q)}>⚡ {q}</button>)}
               </div>
             )}
+            {expireSec > 0 && (
+              <div className="reply-bar" style={{ borderLeftColor: "#E0A040" }}>
+                <span style={{ color: "#E0A040" }}>⏱ Исчезающие сообщения: {expireSec < 60 ? `${expireSec} сек` : expireSec < 3600 ? `${expireSec / 60} мин` : "1 час"}</span>
+                <button className="icon-btn" style={{ fontSize: 13, marginLeft: "auto" }} onClick={() => setExpireSec(0)}>✕</button>
+              </div>
+            )}
             <div className="compose-row" style={{ position: "relative" }}>
               {mentionQuery !== null && isGroup && (() => {
                 const list = activeMembers.filter((u) => u.id !== me.id
@@ -2028,6 +2115,22 @@ export default function App() {
                   </div>
                 ) : null;
               })()}
+              {showStickers && (
+                <div className="emoji-pop">
+                  <button className="pop-x" onClick={() => setShowStickers(false)}>✕</button>
+                  <input ref={stickerInp} type="file" accept="image/*" hidden onChange={(e) => { addSticker(e.target.files[0]); e.target.value = ""; }} />
+                  <div className="sticker-grid">
+                    {(prefs.stickers || []).map((url, i) => (
+                      <div className="sticker-cell" key={i}>
+                        <img src={url} alt="" onClick={() => sendSticker(url)} />
+                        <button className="st-del" onClick={(ev) => { ev.stopPropagation(); setPrefsAnd({ stickers: prefs.stickers.filter((_, k) => k !== i) }); }}>✕</button>
+                      </div>
+                    ))}
+                    <button className="sticker-add" onClick={() => stickerInp.current?.click()}>＋</button>
+                  </div>
+                  {!(prefs.stickers || []).length && <p className="muted" style={{ textAlign: "center", padding: 10, fontSize: 13 }}>Добавьте свои стикеры кнопкой ＋ (картинка или GIF)</p>}
+                </div>
+              )}
               {showEmoji && (
                 <div className="emoji-pop">
                   <button className="pop-x" onClick={() => setShowEmoji(false)}>✕</button>
@@ -2044,11 +2147,15 @@ export default function App() {
                   <button onClick={() => { setShowAttach(false); mediaInp.current?.click(); }}>🖼 Фото или видео</button>
                   <button onClick={() => { setShowAttach(false); fileInp.current?.click(); }}>📄 Документ</button>
                   <button onClick={() => { setShowAttach(false); originalRef.current = true; fileInp.current?.click(); }}>🗂 Оригинал (без сжатия)</button>
+                  <button onClick={() => { const opts = [0, 5, 30, 300, 3600]; const cur = opts.indexOf(expireSec); setExpireSec(opts[(cur + 1) % opts.length]); }}>
+                    ⏱ Исчезающие: {expireSec === 0 ? "выкл" : expireSec < 60 ? `${expireSec} сек` : expireSec < 3600 ? `${expireSec / 60} мин` : "1 час"}
+                  </button>
                   <button onClick={startVoice}>🎤 Голосовое сообщение</button>
                 </div>
               )}
               <button className="icon-btn" title="Прикрепить" onClick={(e) => { e.stopPropagation(); setShowAttach(!showAttach); setShowEmoji(false); }}>{btnIcon("attach", "📎")}</button>
-              <button className="icon-btn" title="Эмодзи" onClick={() => { setShowEmoji(!showEmoji); setShowAttach(false); }}>{btnIcon("emoji", "😊")}</button>
+              <button className="icon-btn" title="Эмодзи" onClick={() => { setShowEmoji(!showEmoji); setShowAttach(false); setShowStickers(false); }}>{btnIcon("emoji", "😊")}</button>
+              <button className="icon-btn" title="Стикеры" onClick={() => { setShowStickers(!showStickers); setShowEmoji(false); setShowAttach(false); }}>{btnIcon("sticker", "🌟")}</button>
               {recording ? (
                 <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "0 10px" }}>
                   <span style={{ color: "#E26060" }}>● Запись… {Math.round((Date.now() - recording.start) / 1000)}с</span>
@@ -2056,7 +2163,7 @@ export default function App() {
                   <button className="chip" onClick={() => stopVoice(false)}>Отмена</button>
                 </div>
               ) : (
-                <textarea ref={taRef} rows={1} placeholder="Сообщение" value={draft}
+                <textarea ref={taRef} rows={1} placeholder={t("Сообщение")} value={draft}
                   onChange={(e) => {
                     const v = e.target.value;
                     setDraft(v);
@@ -2091,21 +2198,21 @@ export default function App() {
             <div className="drawer-status" onClick={() => setStatusPick(true)}>Сменить эмодзи-статус</div>
           </div>
           <div className="d-sep" />
-          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">👤</span> Мой профиль</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">👤</span> {t("Профиль")}</button>
           <div className="d-sep" />
-          <button className="d-row" onClick={() => { setShowMenu(false); setNewKind("group"); setShowGroupNew(true); }}><span className="d-ic">👥</span> Новая группа</button>
-          <button className="d-row" onClick={() => { setShowMenu(false); setNewKind("channel"); setShowGroupNew(true); }}><span className="d-ic">📣</span> Новый канал</button>
-          <button className="d-row" onClick={() => { setShowContacts(true); }}><span className="d-ic">👫</span> Контакты</button>
-          <button className="d-row" onClick={() => { setShowCalls(true); }}><span className="d-ic">📞</span> Звонки</button>
-          <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> Избранное</button>
-          <button className="d-row" onClick={openFeedback}><span className="d-ic">📮</span> Обратная связь</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setNewKind("group"); setShowGroupNew(true); }}><span className="d-ic">👥</span> {t("Новая группа")}</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setNewKind("channel"); setShowGroupNew(true); }}><span className="d-ic">📣</span> {t("Новый канал")}</button>
+          <button className="d-row" onClick={() => { setShowContacts(true); }}><span className="d-ic">👫</span> {t("Контакты")}</button>
+          <button className="d-row" onClick={() => { setShowCalls(true); }}><span className="d-ic">📞</span> {t("Звонки")}</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> {t("Избранное")}</button>
+          <button className="d-row" onClick={openFeedback}><span className="d-ic">📮</span> {t("Обратная связь")}</button>
           {amAppAdmin && <button className="d-row" onClick={openAdmin}><span className="d-ic">🛡</span> Админ-панель</button>}
-          <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> Статистика</button>
+          <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> {t("Статистика")}</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
-          <button className="d-row" onClick={openMarket}><span className="d-ic">🛍</span> Маркет тем</button>
-          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> Настройки</button>
+          <button className="d-row" onClick={openMarket}><span className="d-ic">🛍</span> {t("Маркет тем")}</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> {t("Настройки")}</button>
           <button className="d-row" onClick={() => setPrefsAnd({ theme: prefs.theme === "light" ? "dark" : "light" })}>
-            <span className="d-ic">🌙</span> Ночной режим
+            <span className="d-ic">🌙</span> {t("Ночной режим")}
             <span className="right"><span className={`toggle${prefs.theme !== "light" ? " on" : ""}`} style={{ display: "inline-block" }} /></span>
           </button>
         </div>
@@ -2208,6 +2315,7 @@ export default function App() {
               setPrefsAnd({ folders: prefs.folders.map((x) => x.id === f.id ? { ...x, chatIds: has ? x.chatIds.filter((i) => i !== chatMenu.chat.id) : [...x.chatIds, chatMenu.chat.id] } : x) });
             }}>{f.chatIds.includes(chatMenu.chat.id) ? "✓ " : "　"}{f.name}</button>
           )) : <button style={{ paddingLeft: 34, color: "var(--muted)" }} onClick={() => { setChatMenu(null); openFolderEditor("new"); }}>Создать папку…</button>)}
+          <button onClick={() => { const id = chatMenu.chat.id; setChatMenu(null); setChatPin(id); }}>🔒 {(prefs.chatPins || {})[chatMenu.chat.id] ? "Снять пин-код" : "Поставить пин-код"}</button>
           <button onClick={() => { const c = chatMenu.chat; setChatMenu(null); clearHistory(c); }}>🧹 Очистить историю</button>
           {chatMenu.chat.is_group ? (
             <button style={{ color: "#E26060" }} onClick={() => { const c = chatMenu.chat; setChatMenu(null); leaveGroup(c.id); }}>
@@ -2469,6 +2577,13 @@ export default function App() {
                 <div style={{ fontWeight: 700, fontSize: 19, color: peer.name_color || undefined }}>{peer.login}{peer.status_emoji ? ` ${peer.status_emoji}` : ""}</div>
                 <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
                 {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
+                <div className="ios-list" style={{ marginTop: 10 }}>
+                  {[["photo", "🖼", "фото"], ["video", "🎬", "видео"], ["file", "📄", "файлов"], ["audio", "🎧", "аудио"], ["link", "🔗", "ссылок"], ["voice", "🎤", "голосовых"]].map(([k, ic, label]) => (
+                    <button className="ios-row" key={k} onClick={() => setMediaTab(k)}>
+                      <span>{ic}</span> {mediaOf(k).length} {label}<span className="cnt">›</span>
+                    </button>
+                  ))}
+                </div>
                 <p className="stat" style={{ marginTop: 10 }}>В мессенджере с {new Date(peer.created_at).toLocaleDateString("ru-RU")}</p>
                 {peer.id !== me.id && (
                   <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -2669,6 +2784,28 @@ export default function App() {
               )}
 
               <div className="sec">
+                <h3>🕶 Приватность</h3>
+                <div className="toggle-row">
+                  <span>Скрывать мой онлайн и «был(а)»</span>
+                  <button className={`toggle${me.hide_online ? " on" : ""}`} onClick={() => saveProfile({ hide_online: !me.hide_online })} />
+                </div>
+                <div className="toggle-row">
+                  <span>Скрытое прочтение (не слать галочки)</span>
+                  <button className={`toggle${me.hide_read ? " on" : ""}`} onClick={() => saveProfile({ hide_read: !me.hide_read })} />
+                </div>
+                <p className="stat">Невидимка прячет ваш статус от других. Скрытое прочтение — собеседник не увидит вторую галочку, но и вы перестанете видеть прочтение в ответ.</p>
+                <h3>🤖 Автоответчик</h3>
+                <input className="field" placeholder="Текст автоответа (пусто — выключен)" maxLength={200} defaultValue={me.auto_reply || ""}
+                  onBlur={(e) => { const v = e.target.value.trim(); if (v !== (me.auto_reply || "")) saveProfile({ auto_reply: v || null }); }} />
+                <p className="stat">Автоматически отвечает на первое сообщение в личке, не чаще раза в 5 минут на чат.</p>
+                <h3>🌐 Язык интерфейса</h3>
+                <div className="quick-chips">
+                  {LANGS.map((l) => <button key={l.id} className={`chip${(prefs.lang || "ru") === l.id ? " chip-on" : ""}`} onClick={() => setPrefsAnd({ lang: l.id })}>{l.name}</button>)}
+                </div>
+                <p className="stat">Перевод охватывает основные элементы интерфейса; будет дополняться.</p>
+              </div>
+
+              <div className="sec">
                 <h3>Аккаунт</h3>
                 <input className="field" placeholder="Отображаемое имя" maxLength={24} defaultValue={me.login}
                   onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== me.login) saveProfile({ login: v }); }} />
@@ -2804,6 +2941,61 @@ export default function App() {
         </div>
       )}
 
+      {/* МЕДИАТЕКА ЛИЧНОГО ЧАТА */}
+      {mediaTab && !isGroup && activeChat && (
+        <div className="overlay" style={{ zIndex: 71 }} onClick={() => setMediaTab(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <button className="icon-btn" onClick={() => setMediaTab(null)}>←</button>
+                <h3 style={{ margin: 0 }}>{{ photo: "Фото", video: "Видео", file: "Файлы", audio: "Аудио", voice: "Голосовые", link: "Ссылки" }[mediaTab]}</h3>
+              </div>
+              {mediaTab === "photo" ? (
+                <div className="media-grid">{mediaOf("photo").map((m) => <img key={m.id} src={m.content} alt="" onClick={() => setViewer(m.content)} />)}</div>
+              ) : mediaOf(mediaTab).map((m) => (
+                <div className="member-row" key={m.id}>
+                  {mediaTab === "video" ? <video src={m.content} controls style={{ maxWidth: 170, borderRadius: 8 }} />
+                    : mediaTab === "voice" ? <VoiceBubble msg={m} />
+                    : mediaTab === "link" ? <a className="link-card" style={{ flex: 1, wordBreak: "break-all" }} href={findUrl(m.content)} target="_blank" rel="noreferrer">{findUrl(m.content)}</a>
+                    : <a className="b-file" href={m.content} download={m.file_name} style={{ color: "var(--text)", textDecoration: "none", flex: 1 }}>
+                        <div className="fi">{mediaTab === "audio" ? "🎧" : "📄"}</div>
+                        <div><div style={{ fontWeight: 600, fontSize: 14 }}>{m.file_name}</div><div className="muted" style={{ fontSize: 12.5 }}>{fmtSize(m.file_size || 0)}</div></div>
+                      </a>}
+                  <span className="muted" style={{ fontSize: 12, marginLeft: "auto" }}>{fmtTime(m.created_at)}</span>
+                </div>
+              ))}
+              {mediaOf(mediaTab).length === 0 && <p className="muted" style={{ textAlign: "center", padding: 16 }}>Пока пусто</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ВВОД ПИН-КОДА */}
+      {lockedOpen && (
+        <div className="overlay" style={{ zIndex: 82 }} onClick={() => { setLockedOpen(null); setPinInput(""); }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad" style={{ textAlign: "center" }}>
+              <h3 style={{ marginTop: 0 }}>🔒 Чат защищён</h3>
+              <p className="muted" style={{ fontSize: 14 }}>Введите пин-код, чтобы открыть.</p>
+              <input className="field" type="password" inputMode="numeric" autoFocus
+                style={{ textAlign: "center", fontSize: 22, letterSpacing: 6 }}
+                value={pinInput} maxLength={6}
+                onChange={(e) => {
+                  const v = e.target.value.replace(/\D/g, "");
+                  setPinInput(v);
+                  if (v === (prefs.chatPins || {})[lockedOpen]) {
+                    const id = lockedOpen;
+                    setUnlocked((u) => ({ ...u, [id]: true }));
+                    setLockedOpen(null); setPinInput("");
+                    setUnlocked((u) => { openChatUnlocked(id); return { ...u, [id]: true }; });
+                  }
+                }} />
+              <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => { setLockedOpen(null); setPinInput(""); }}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ПРЕДПРОСМОТР ПЕРЕД ОТПРАВКОЙ */}
       {pendingMedia && (
         <div className="overlay" style={{ zIndex: 75 }} onClick={() => setPendingMedia(null)}>
@@ -2841,8 +3033,14 @@ export default function App() {
                   : (() => { const d = Math.floor((Date.now() - call.startedAt) / 1000); return `${String(Math.floor(d / 60)).padStart(2, "0")}:${String(d % 60).padStart(2, "0")}`; })()}
             </div>
             {!TURN_URLS.length && (
-              <div className="call-warn">⚠️ TURN не настроен: между разными сетями звук не пройдёт.<br />Переменные VITE_TURN_* в Vercel + Redeploy (ИНСТРУКЦИЯ-ЗВОНКИ.md)</div>
+              <div className="call-warn">⚠️ TURN-сервер не подключён: между разными сетями связь не встанет.<br />Добавьте VITE_TURN_* в Vercel и сделайте Redeploy (см. ИНСТРУКЦИЯ-ЗВОНКИ.md)</div>
             )}
+            {TURN_URLS.length > 0 && callNet && !["connected", "completed"].includes(callNet) && callDiag.cands > 4 && callDiag.relay === 0 && (
+              <div className="call-warn">⚠️ TURN-ключи заданы, но ретранслятор не отвечает (нет relay-кандидатов).<br />Скорее всего ключи устарели — обновите их в кабинете Metered.</div>
+            )}
+            <div className="call-diag">
+              сеть: {callNet || "—"} · ICE: {callDiag.ice || "—"} · сбор: {callDiag.gather || "—"} · кандидатов: {callDiag.cands} (через TURN: {callDiag.relay}) · TURN-серверов: {callDiag.turn}
+            </div>
           </div>
           {call.video && <video ref={localVideoRef} autoPlay playsInline muted className="call-local" />}
           <div className="call-btns">
@@ -2902,7 +3100,7 @@ export default function App() {
         onChange={(e) => { addThemeMedia(e.target.files[0]); e.target.value = ""; }} />
       {showMarket && (
         <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowMarket(false)}>
-          <div className="modal market-app" onClick={(e) => e.stopPropagation()}>
+          <div className="modal market-app fullscreen" onClick={(e) => e.stopPropagation()}>
 
             {/* === Публикация === */}
             {publishForm ? (
@@ -3207,7 +3405,7 @@ export default function App() {
 
               <div className="sec">
                 <h3>Кнопки: эмодзи, картинки и анимации</h3>
-                {[["menu", "☰", "Меню"], ["back", "←", "Назад"], ["search", "🔍", "Поиск"], ["call", "📞", "Звонок"], ["video", "🎥", "Видеозвонок"], ["fav", "⭐", "Избранное"], ["group", "👥", "Группы"], ["attach", "📎", "Скрепка"], ["emoji", "😊", "Эмодзи"], ["send", "➤", "Отправить"]].map(([id, fb, label]) => (
+                {[["menu", "☰", "Меню"], ["back", "←", "Назад"], ["search", "🔍", "Поиск"], ["call", "📞", "Звонок"], ["video", "🎥", "Видеозвонок"], ["fav", "⭐", "Избранное"], ["group", "👥", "Группы"], ["attach", "📎", "Скрепка"], ["emoji", "😊", "Эмодзи"], ["sticker", "🌟", "Стикеры"], ["send", "➤", "Отправить"]].map(([id, fb, label]) => (
                   <div key={id} className="bld-row">
                     <button className="icon-btn" style={{ fontSize: 18 }}>{btnIcon(id, fb)}</button>
                     <span className="mr-name">{label}</span>
