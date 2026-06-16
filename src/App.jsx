@@ -282,6 +282,11 @@ export default function App() {
   const [lockedOpen, setLockedOpen] = useState(null); // chatId, для которого спрашиваем пин
   const [pinInput, setPinInput] = useState("");
   const [unlocked, setUnlocked] = useState({}); // chatId -> true в текущей сессии
+  const [showReports, setShowReports] = useState(false);
+  const [reports, setReports] = useState(null);
+  const [recoverMode, setRecoverMode] = useState(false);
+  const [recCode, setRecCode] = useState("");
+  const [recNew, setRecNew] = useState("");
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -413,6 +418,11 @@ export default function App() {
       const title = ch?.is_group ? `${sender} — ${ch.title || "Группа"}` : sender;
       const body = m.type === "text" ? m.content.slice(0, 80)
         : ({ photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "Сообщение");
+      // Через Service Worker — показывается даже когда вкладка свёрнута/в фоне
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: "notify", title, body, tag: m.chat_id });
+        return;
+      }
       const ic = (APP_ICONS.find((i) => i.id === prefsRef.current?.icon) || APP_ICONS[0]).file;
       const n = new Notification(title, { body, tag: m.chat_id, icon: ic });
       n.onclick = () => { window.focus(); openChat(m.chat_id); n.close(); };
@@ -625,6 +635,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, me?.id]);
 
+  // ---------- PWA: клики по фоновым уведомлениям ----------
+  useEffect(() => {
+    if (!navigator.serviceWorker) return;
+    const onMsg = (e) => { if (e.data?.type === "open-chat" && e.data.chatId) openChat(e.data.chatId); };
+    navigator.serviceWorker.addEventListener("message", onMsg);
+    return () => navigator.serviceWorker.removeEventListener("message", onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ---------- ЗВОНКИ: входящие ----------
   useEffect(() => { callRef.current = call; }, [call]);
   useEffect(() => {
@@ -773,6 +792,7 @@ export default function App() {
       else if (showBuilder) setShowBuilder(false);
       else if (showStats) { if (statUser && amAppAdmin) { setStatUser(null); setStatUserData(null); } else setShowStats(false); }
       else if (showAdmin) { if (adminTarget) setAdminTarget(null); else setShowAdmin(false); }
+      else if (showReports) setShowReports(false);
       else if (showContacts) setShowContacts(false);
       else if (showCalls) setShowCalls(false);
       else if (showMenu) setShowMenu(false);
@@ -786,7 +806,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers, showReports]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -1020,6 +1040,26 @@ export default function App() {
     notify("Сохранено ✓");
   }
 
+  async function reportMsg(m) {
+    const reason = window.prompt("Причина жалобы (необязательно):", "");
+    if (reason === null) return;
+    const { error } = await supabase.from("reports").insert({
+      reporter: me.id, reporter_login: me.login, target_msg: m.id, target_user: m.sender_id,
+      chat_id: m.chat_id, text_snapshot: (m.type === "text" ? m.content : "[" + m.type + "]").slice(0, 200), reason,
+    });
+    if (error) { notify(`Не удалось отправить жалобу: ${error.message}`); return; }
+    notify("Жалоба отправлена администратору ✓");
+  }
+  async function openReports() {
+    setShowMenu(false); setShowReports(true); setReports(null);
+    const { data, error } = await supabase.from("reports").select("*").order("created_at", { ascending: false }).limit(100);
+    if (error) { notify("Жалобы недоступны: выполните миграцию v15."); setReports([]); return; }
+    setReports(data || []);
+  }
+  async function resolveReport(r) {
+    await supabase.from("reports").update({ status: "done" }).eq("id", r.id);
+    setReports((l) => (l || []).map((x) => x.id === r.id ? { ...x, status: "done" } : x));
+  }
   async function openByTag(tag) {
     const lo = tag.toLowerCase();
     let u = Object.values(profiles).find((x) => x.tag?.toLowerCase() === lo) || (me.tag?.toLowerCase() === lo ? me : null);
@@ -1488,8 +1528,9 @@ export default function App() {
           : await uploadMedia(await resizeToBlob(file, 1100, 0.78), "jpg", "image/jpeg");
         await sendMessage({ type: "photo", content: url, file_name: file.name });
       } else if (file.type.startsWith("video/")) {
-        if (file.size > 25 * 1048576) { notify("Видео больше 25 МБ — не поместится."); return; }
-        notify("Загружаем видео…");
+        if (file.size > 25 * 1048576) { notify("Видео больше 25 МБ. Сожмите его или пришлите ссылкой."); return; }
+        if (file.size > 12 * 1048576) notify("Большое видео — загрузка может занять время…");
+        else notify("Загружаем видео…");
         const url = await uploadMedia(file, extOf(file.name, "mp4"), file.type || "video/mp4");
         await sendMessage({ type: "video", content: url, file_name: file.name, file_size: file.size });
       }
@@ -1745,6 +1786,29 @@ export default function App() {
       <div className="tg" data-theme={prefs.theme} style={{ ...themeVars, display: "block" }}>
         <style>{css}</style>
         <div className="auth-wrap">
+          {recoverMode && (
+            <div className="auth-box">
+              <h1>Восстановление</h1>
+              <p className="sub">Введите свой @тег, резервный код и новый пароль.</p>
+              <input className="field" placeholder="@тег" value={tag} onChange={(e) => setTag(e.target.value)} />
+              <input className="field" placeholder="Резервный код" value={recCode} onChange={(e) => setRecCode(e.target.value)} />
+              <input className="field" type="password" placeholder="Новый пароль (от 6 символов)" value={recNew} onChange={(e) => setRecNew(e.target.value)} />
+              {err && <p className="err">{err}</p>}
+              <button className="btn" onClick={async () => {
+                setErr("");
+                const { data, error } = await supabase.rpc("reset_by_code", {
+                  p_tag: tag.trim().replace(/^@/, ""), p_code: recCode.trim(), p_new_pass: recNew });
+                if (error) { setErr("Ошибка: " + error.message); return; }
+                const map = { no_user: "Пользователь не найден.", no_code: "Для аккаунта не задан резервный код.",
+                  bad_code: "Неверный резервный код.", weak: "Пароль слишком короткий.", ok: "" };
+                if (data !== "ok") { setErr(map[data] || "Не удалось."); return; }
+                setRecoverMode(false); setRecCode(""); setRecNew(""); setErr("");
+                notify("Пароль изменён — войдите с новым.");
+              }}>Сбросить пароль</button>
+              <button className="btn ghost" onClick={() => { setRecoverMode(false); setErr(""); }}>Назад ко входу</button>
+            </div>
+          )}
+          {!recoverMode && (
           <div className="auth-box">
             <h1>Мессенджер</h1>
             <p className="sub">{isReg ? (regStep === 1 ? "Создание аккаунта" : "Выберите ваш @тег") : "Войдите, чтобы продолжить"}</p>
@@ -1758,6 +1822,7 @@ export default function App() {
               {err && <p className="err">{err}</p>}
               <button className="btn" onClick={doLogin} disabled={!login || !pass || busy}>{busy ? "Входим…" : "Войти"}</button>
               <button className="btn ghost" onClick={() => { setPhase("register"); setErr(""); setRegStep(1); }}>Нет аккаунта? Зарегистрироваться</button>
+              <button className="btn ghost" onClick={() => { setRecoverMode(true); setErr(""); }}>Забыли пароль?</button>
             </>)}
             {isReg && regStep === 1 && (<>
               <input className="field" placeholder="Логин" value={login} onChange={(e) => setLogin(e.target.value)} />
@@ -1777,6 +1842,7 @@ export default function App() {
               <button className="btn" onClick={doRegisterFinish} disabled={busy}>{busy ? "Сохраняем…" : "Завершить регистрацию"}</button>
             </>)}
           </div>
+          )}
         </div>
       </div>
     );
@@ -2207,6 +2273,7 @@ export default function App() {
           <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> {t("Избранное")}</button>
           <button className="d-row" onClick={openFeedback}><span className="d-ic">📮</span> {t("Обратная связь")}</button>
           {amAppAdmin && <button className="d-row" onClick={openAdmin}><span className="d-ic">🛡</span> Админ-панель</button>}
+          {amAppAdmin && <button className="d-row" onClick={openReports}><span className="d-ic">🚩</span> Жалобы</button>}
           <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> {t("Статистика")}</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
           <button className="d-row" onClick={openMarket}><span className="d-ic">🛍</span> {t("Маркет тем")}</button>
@@ -2340,6 +2407,7 @@ export default function App() {
           <button onClick={() => pinMsg(menu.msg)}>📌 {activeChat?.pinned_msg === menu.msg.id ? "Открепить" : "Закрепить"}</button>
           {menu.msg.sender_id === me.id && isGroup && <button onClick={() => { const m = menu.msg; setMenu(null); setReadersFor(m); }}>👁 Кто прочитал</button>}
           {Object.keys(menu.msg.reactions || {}).length > 0 && <button onClick={() => { const m = menu.msg; setMenu(null); setReactViewer(m); }}>👀 Кто поставил реакции</button>}
+          {menu.msg.sender_id !== me.id && <button onClick={() => { const m = menu.msg; setMenu(null); reportMsg(m); }}>🚩 Пожаловаться</button>}
           {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
           <button className="menu-close" onClick={() => setMenu(null)}>✕ Закрыть</button>
         </div>
@@ -2828,6 +2896,15 @@ export default function App() {
                     e.target.value = ""; notify("Пароль изменён ✓");
                   }} />
                 <p className="stat">Имя и @тег меняются сразу. Логин для входа остаётся прежним.</p>
+                <h3>🔑 Резервный код</h3>
+                <button className="btn ghost" onClick={async () => {
+                  const code = Math.random().toString(36).slice(2, 8).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase();
+                  const { error } = await supabase.rpc("set_recovery", { p_code: code });
+                  if (error) { notify(`Не удалось: ${error.message}`); return; }
+                  window.prompt("Сохраните этот код в надёжном месте. По нему можно сбросить пароль (показывается один раз):", code);
+                  notify("Резервный код сохранён ✓");
+                }}>Сгенерировать резервный код</button>
+                <p className="stat">Понадобится, если забудете пароль. Запишите и храните отдельно — мы видим только его зашифрованный отпечаток.</p>
               </div>
 
               <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
@@ -3225,7 +3302,40 @@ export default function App() {
         </div>
       )}
 
-      {/* АДМИН-ПАНЕЛЬ */}      {/* АДМИН-ПАНЕЛЬ */}
+      {/* ЖАЛОБЫ (админ) */}
+      {showReports && (
+        <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowReports(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <h3 style={{ marginTop: 0 }}>🚩 Жалобы</h3>
+              {reports === null ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Загрузка…</p>
+                : !reports.length ? <p className="muted" style={{ textAlign: "center", padding: 14 }}>Жалоб нет 🎉</p>
+                : reports.map((r) => (
+                  <div key={r.id} className={`report-card${r.status === "done" ? " done" : ""}`}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <b style={{ fontSize: 13.5 }}>от {r.reporter_login || "?"}</b>
+                      <span className="muted" style={{ fontSize: 11.5 }}>{new Date(r.created_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+                    </div>
+                    {r.reason && <div style={{ fontSize: 13.5, marginTop: 4 }}>Причина: {r.reason}</div>}
+                    <div className="muted" style={{ fontSize: 13, marginTop: 4, fontStyle: "italic" }}>«{r.text_snapshot}»</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                      {r.target_user && (
+                        <button className="chip" onClick={async () => {
+                          const { data } = await supabase.from("profiles").select("*").eq("id", r.target_user).maybeSingle();
+                          if (data) { cacheProfiles([data]); setShowReports(false); setShowAdmin(true); setAdminTarget(data); }
+                        }}>К нарушителю →</button>
+                      )}
+                      {r.status !== "done" && <button className="chip chip-on" onClick={() => resolveReport(r)}>✓ Решено</button>}
+                    </div>
+                  </div>
+                ))}
+              <button className="btn ghost" style={{ marginTop: 10 }} onClick={() => setShowReports(false)}>Закрыть</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* АДМИН-ПАНЕЛЬ */}
       {showAdmin && (
         <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowAdmin(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>

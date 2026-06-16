@@ -1,0 +1,12 @@
+{
+  "name": "Мессенджер",
+  "short_name": "Мессенджер",
+  "description": "Кастомизируемый мессенджер",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#17212B",
+  "theme_color": "#17212B",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

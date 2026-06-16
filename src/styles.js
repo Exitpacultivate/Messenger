@@ -376,4 +376,7 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
 .sticker-cell:hover .st-del { opacity: 1; }
 .sticker-add { aspect-ratio: 1; border: 2px dashed var(--line); background: none; border-radius: 8px;
   color: var(--muted); font-size: 24px; cursor: pointer; }
+
+.report-card { background: var(--input); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+.report-card.done { opacity: 0.5; }
 `;
