@@ -651,6 +651,37 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, me?.id]);
 
+  // ---------- OneSignal: привязка подписки к аккаунту ----------
+  useEffect(() => {
+    if (phase !== "main" || !me) return;
+    try {
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      window.OneSignalDeferred.push(async (OneSignal) => {
+        try {
+          await OneSignal.login(me.id); // связываем external_id с нашим id
+          const sid = OneSignal.User?.PushSubscription?.id;
+          if (sid && sid !== me.push_id) {
+            await supabase.from("profiles").update({ push_id: sid }).eq("id", me.id);
+          }
+        } catch {}
+      });
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, me?.id]);
+
+  async function enablePush() {
+    try {
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      window.OneSignalDeferred.push(async (OneSignal) => {
+        await OneSignal.Notifications.requestPermission();
+        await OneSignal.login(me.id);
+        const sid = OneSignal.User?.PushSubscription?.id;
+        if (sid) await supabase.from("profiles").update({ push_id: sid }).eq("id", me.id);
+        notify("Push-уведомления подключены ✓");
+      });
+    } catch { notify("Не удалось подключить push."); }
+  }
+
   // ---------- PWA: клики по фоновым уведомлениям ----------
   useEffect(() => {
     if (!navigator.serviceWorker) return;
@@ -2966,6 +2997,11 @@ export default function App() {
                     : <button className="chip" onClick={async () => { try { setNotifPerm(await Notification.requestPermission()); } catch {} }}>Включить</button>}
                 </div>
                 <p className="stat">Уведомления и звуки работают, пока сайт открыт — в том числе в фоновой вкладке. Заглушённые чаты (🔕) не шумят.</p>
+                <div className="toggle-row">
+                  <span>📲 Push при закрытом браузере</span>
+                  <button className="chip" onClick={enablePush}>Подключить</button>
+                </div>
+                <p className="stat">Push-уведомления через OneSignal приходят, даже когда мессенджер полностью закрыт. Нажмите «Подключить» и разрешите уведомления в браузере.</p>
               </div>
 
               <div className="sec">
