@@ -35,6 +35,19 @@ const ICE_SERVERS = [
     credential: import.meta.env.VITE_TURN_CREDENTIAL || "",
   }] : []),
 ];
+const TEXTURES = [
+  { id: "dots", name: "Точки", make: (c) => `radial-gradient(${c} 1.4px, transparent 1.5px) 0 0 / 14px 14px` },
+  { id: "grid", name: "Сетка", make: (c) => `linear-gradient(${c} 1px, transparent 1px) 0 0 / 20px 20px, linear-gradient(90deg, ${c} 1px, transparent 1px) 0 0 / 20px 20px` },
+  { id: "diag", name: "Полоски", make: (c) => `repeating-linear-gradient(45deg, ${c} 0 2px, transparent 2px 12px)` },
+  { id: "cross", name: "Крестики", make: (c) => `repeating-linear-gradient(45deg, ${c} 0 1px, transparent 1px 16px), repeating-linear-gradient(-45deg, ${c} 0 1px, transparent 1px 16px)` },
+  { id: "zigzag", name: "Зигзаг", make: (c) => `repeating-linear-gradient(135deg, ${c} 0 2px, transparent 2px 9px)` },
+  { id: "checker", name: "Шахматы", make: (c) => `repeating-conic-gradient(${c} 0 25%, transparent 0 50%) 0 0 / 24px 24px` },
+];
+const textureCss = (texId, texColor, baseColor) => {
+  const t = TEXTURES.find((x) => x.id === texId);
+  if (!t) return null;
+  return { backgroundColor: baseColor || "#1d2733", backgroundImage: t.make(texColor || "rgba(255,255,255,0.12)") };
+};
 const blobToB64 = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
 const loginToEmail = (login) => `${login.trim().toLowerCase()}@${EMAIL_DOMAIN}`;
 
@@ -287,6 +300,9 @@ export default function App() {
   const [recoverMode, setRecoverMode] = useState(false);
   const [recCode, setRecCode] = useState("");
   const [recNew, setRecNew] = useState("");
+  const [editing, setEditing] = useState(null); // сообщение, которое редактируем
+  const [forwarding, setForwarding] = useState(null); // сообщение для пересылки
+  const [globalSearch, setGlobalSearch] = useState(null);
   const [groupTitle, setGroupTitle] = useState("");
   const [groupPicks, setGroupPicks] = useState([]);
   const [groupQuery, setGroupQuery] = useState("");
@@ -780,6 +796,8 @@ export default function App() {
     const onKey = (e) => {
       if (e.key !== "Escape") return;
       if (menu) setMenu(null);
+      else if (forwarding) setForwarding(null);
+      else if (editing) { setEditing(null); setDraft(""); }
       else if (mentionQuery !== null) setMentionQuery(null);
       else if (chatMenu) setChatMenu(null);
       else if (showStickers) setShowStickers(false);
@@ -806,7 +824,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers, showReports]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers, showReports, forwarding, editing]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -900,6 +918,42 @@ export default function App() {
   useUserSearch(addQuery, setAddResults, (u) => !(members[activeId] || []).some((m) => m.user_id === u.id));
   useUserSearch(statQuery, setStatResults);
   useUserSearch(adminQuery, setAdminResults);
+  useEffect(() => {
+    if (phase !== "main") return;
+    const q = userQuery.trim();
+    if (q.length < 2 || q.startsWith("@")) { setGlobalSearch(null); return; }
+    const t = setTimeout(() => {
+      const myChatIds = chats.map((c) => c.id);
+      const hits = [];
+      for (const cid of myChatIds) {
+        for (const m of (messages[cid] || [])) {
+          if (m.type === "text" && m.content.toLowerCase().includes(q.toLowerCase())) hits.push(m);
+        }
+      }
+      setGlobalSearch(hits.slice(0, 40));
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userQuery, phase, messages]);
+
+  function ForwardPicker() {
+    return (
+      <div className="overlay" style={{ zIndex: 82 }} onClick={() => setForwarding(null)}>
+        <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-pad">
+            <h3 style={{ marginTop: 0 }}>↪ Переслать в чат</h3>
+            {sortedChats.map((c) => (
+              <div className="member-row" key={c.id} style={{ cursor: "pointer" }} onClick={() => doForward(c.id)}>
+                {c.is_group ? <GroupAvatar chat={c} size="sm" /> : <Avatar user={profiles[c.u1 === me.id ? c.u2 : c.u1] || { tag: "?" }} size="sm" />}
+                <span className="mr-name">{c.is_group ? (c.is_channel ? "📣 " : "👥 ") : ""}{chatTitle(c)}</span>
+              </div>
+            ))}
+            <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setForwarding(null)}>Отмена</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   useEffect(() => {
     if (phase !== "main") return;
@@ -1040,6 +1094,19 @@ export default function App() {
     notify("Сохранено ✓");
   }
 
+  async function doForward(targetChatId) {
+    const m = forwarding;
+    setForwarding(null);
+    const fwd = { name: senderName(m), from_chat: m.chat_id };
+    const base = { chat_id: targetChatId, sender_id: me.id, reactions: {}, forwarded: fwd };
+    let row;
+    if (m.type === "text") row = { ...base, type: "text", content: m.content };
+    else row = { ...base, type: m.type, content: m.content, file_name: m.file_name, file_size: m.file_size, duration: m.duration, waveform: m.waveform };
+    const { error } = await supabase.from("messages").insert(row);
+    if (error) { notify(`Не удалось переслать: ${error.message}`); return; }
+    notify("Переслано ✓");
+    openChat(targetChatId);
+  }
   async function reportMsg(m) {
     const reason = window.prompt("Причина жалобы (необязательно):", "");
     if (reason === null) return;
@@ -1474,6 +1541,7 @@ export default function App() {
     const row = {
       chat_id: activeId, sender_id: me.id, reactions: {},
       reply_to: replyTo ? { id: replyTo.id, name: senderName(replyTo), text: previewOf(replyTo) } : null,
+      ...(payload._forwarded ? { forwarded: payload._forwarded } : {}),
       ...(expireSec ? { expires_at: new Date(Date.now() + expireSec * 1000).toISOString() } : {}),
       ...payload,
     };
@@ -1484,7 +1552,17 @@ export default function App() {
       : error.message.includes("too large") ? "Файл слишком большой."
       : "Не удалось отправить, проверьте интернет.");
   }
+  async function saveEdit() {
+    const t = draft.trim();
+    const m = editing;
+    setEditing(null); setDraft("");
+    if (taRef.current) taRef.current.style.height = "auto";
+    if (!t || t === m.content) return;
+    const { error } = await supabase.from("messages").update({ content: t, edited_at: new Date().toISOString() }).eq("id", m.id);
+    if (error) notify("Не удалось изменить.");
+  }
   function sendText(text) {
+    if (editing) { saveEdit(); return; }
     const t = (text ?? draft).trim();
     if (!t) return;
     sendMessage({ type: "text", content: t });
@@ -1614,10 +1692,12 @@ export default function App() {
   }
   async function pinMsg(msg) {
     setMenu(null);
-    const next = activeChat?.pinned_msg === msg.id ? null : msg.id;
-    const { error } = await supabase.from("chats").update({ pinned_msg: next }).eq("id", activeId);
+    const cur = activeChat?.pinned_msgs || (activeChat?.pinned_msg ? [activeChat.pinned_msg] : []);
+    const has = cur.includes(msg.id);
+    const next = has ? cur.filter((x) => x !== msg.id) : [...cur, msg.id];
+    const { error } = await supabase.from("chats").update({ pinned_msgs: next, pinned_msg: next[next.length - 1] || null }).eq("id", activeId);
     if (error) notify("Не удалось закрепить.");
-    else setChats((cs) => cs.map((c) => (c.id === activeId ? { ...c, pinned_msg: next } : c)));
+    else setChats((cs) => cs.map((c) => (c.id === activeId ? { ...c, pinned_msgs: next, pinned_msg: next[next.length - 1] || null } : c)));
   }
   function openMenuAt(x, y, m) {
     setMenu({ x: Math.min(x, window.innerWidth - 190), y: Math.min(y, window.innerHeight - 290), msg: m });
@@ -1723,9 +1803,17 @@ export default function App() {
     const ic = APP_ICONS.find((i) => i.id === prefs.icon) || APP_ICONS[0];
     if (link && ic) link.href = ic.file;
   }, [prefs.icon]);
-  const bannerCss = (o) => o?.banner_img
-    ? { backgroundImage: `url(${o.banner_img})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : { background: o?.banner_color || BANNERS[o?.banner] || BANNERS[0] };
+  const parseFill = (val) => {
+    if (typeof val === "string" && val.startsWith("tex:")) {
+      const [, id, tc, bc] = val.split("|");
+      return textureCss(id, tc, bc);
+    }
+    return val ? { background: val } : null;
+  };
+  const bannerCss = (o) => {
+    if (o?.banner_img) return { backgroundImage: `url(${o.banner_img})`, backgroundSize: "cover", backgroundPosition: "center" };
+    return parseFill(o?.banner_color) || { background: BANNERS[o?.banner] || BANNERS[0] };
+  };
   const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
   const sortedChats = useMemo(() => chats.filter((c) => !c.is_feedback).sort((a, b) => {
     const pa = (prefs.pinned || []).includes(a.id) ? 1 : 0;
@@ -1903,7 +1991,7 @@ export default function App() {
       <div className="side">
         <div className="side-top">
           <button className="icon-btn" title="Меню" onClick={() => setShowMenu(true)}>{btnIcon("menu", "☰")}</button>
-          <input className="search-input" placeholder="Найти по @тегу…" value={userQuery}
+          <input className="search-input" placeholder="Поиск: @тег, канал или сообщение…" value={userQuery}
             onChange={(e) => setUserQuery(e.target.value)} />
           <button className="icon-btn" title="Избранное" onClick={openFavorites}>{btnIcon("fav", "⭐")}</button>
           <button className="icon-btn" title="Создать группу" onClick={() => setShowGroupNew(true)}>{btnIcon("group", "👥")}</button>
@@ -1932,7 +2020,28 @@ export default function App() {
           <button className="ftab" title="Новая папка" onClick={() => openFolderEditor("new")}>＋</button>
         </div>
         <div className="chats">
-          {(searchResults !== null || channelResults.length > 0) && userQuery.trim() ? (<>
+          {globalSearch && globalSearch.length > 0 && userQuery.trim() && !userQuery.startsWith("@") ? (<>
+            <p className="stat" style={{ padding: "8px 14px 2px" }}>Сообщения ({globalSearch.length}):</p>
+            {globalSearch.map((m) => {
+              const c = chats.find((x) => x.id === m.chat_id);
+              return (
+                <div className="chat-item" key={m.id} onClick={() => { setUserQuery(""); setGlobalSearch(null); openChat(m.chat_id); setTimeout(() => scrollToMsg(m.id), 400); }}>
+                  <div className="ci-body">
+                    <div className="ci-row"><span className="ci-name">{c ? (c.is_group ? "👥 " : "") + chatTitle(c) : "Чат"}</span><span className="ci-time">{fmtTime(m.created_at)}</span></div>
+                    <div className="ci-last">{highlight(m.content.slice(0, 80), userQuery)}</div>
+                  </div>
+                </div>
+              );
+            })}
+            {channelResults.length > 0 && <p className="stat" style={{ padding: "8px 14px 2px" }}>Каналы:</p>}
+            {channelResults.map((c) => (
+              <div className="chat-item" key={c.id} onClick={() => joinChannel(c)}>
+                <GroupAvatar chat={c} />
+                <div className="ci-body"><div className="ci-row"><span className="ci-name">📣 {c.title}</span></div><div className="ci-last">Канал</div></div>
+                <span className="badge">Открыть</span>
+              </div>
+            ))}
+          </>) : (searchResults !== null || channelResults.length > 0) && userQuery.trim() ? (<>
             {channelResults.map((c) => (
               <div className="chat-item" key={c.id} onClick={() => joinChannel(c)}>
                 <GroupAvatar chat={c} />
@@ -2045,12 +2154,15 @@ export default function App() {
             </div>
           )}
 
-          {activeChat.pinned_msg && (() => {
-            const pm = activeMsgs.find((m) => m.id === activeChat.pinned_msg);
-            return pm ? (
-              <div className="pin-bar">📌 <span onClick={() => scrollToMsg(pm.id)} style={{ cursor: "pointer" }} title="Перейти к сообщению"><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
-                <button className="icon-btn" style={{ fontSize: 13 }} onClick={() => pinMsg(pm)}>✕</button></div>
-            ) : null;
+          {(() => {
+            const pins = activeChat.pinned_msgs?.length ? activeChat.pinned_msgs : (activeChat.pinned_msg ? [activeChat.pinned_msg] : []);
+            return pins.map((pid) => {
+              const pm = activeMsgs.find((m) => m.id === pid);
+              return pm ? (
+                <div className="pin-bar" key={pid}>📌 <span onClick={() => scrollToMsg(pm.id)} style={{ cursor: "pointer" }} title="Перейти к сообщению"><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
+                  <button className="icon-btn" style={{ fontSize: 13 }} onClick={() => pinMsg(pm)}>✕</button></div>
+              ) : null;
+            });
           })()}
 
           {!isGroup && peer && peer.id !== me.id && blocked.has(peer.id) && (
@@ -2075,7 +2187,12 @@ export default function App() {
               return (
                 <div key={m.id} ref={(el) => { if (el) msgRefs.current[m.id] = el; }}>
                   {newDay && <div style={{ display: "flex", justifyContent: "center" }}><span className="day-sep">{fmtDay(m.created_at)}</span></div>}
-                  <div className={`bubble-row ${out ? "out" : "in"}`}>
+                  <div className={`bubble-row ${out ? "out" : "in"}`}
+                    onTouchStart={(e) => { e.currentTarget._sx = e.touches[0].clientX; }}
+                    onTouchEnd={(e) => {
+                      const sx = e.currentTarget._sx;
+                      if (sx != null && e.changedTouches[0].clientX - sx > 55) { setReplyTo(m); taRef.current?.focus(); }
+                    }}>
                     {isGroup && !isChannel && !out && (
                       <div className="msg-ava" onClick={() => profiles[m.sender_id] && setShowMember(profiles[m.sender_id])}>
                         {showAva && <Avatar user={profiles[m.sender_id]} size="xs" />}
@@ -2088,6 +2205,7 @@ export default function App() {
                       onTouchEnd={bubbleTouchCancel}
                       onTouchMove={bubbleTouchCancel}>
                       {showSender && <div className="b-sender" style={{ color: senderColor(m.sender_id) }}>{profiles[m.sender_id]?.login || "…"}</div>}
+                      {m.forwarded && <div className="fwd-label">↪ Переслано от {m.forwarded.name}</div>}
                       {m.reply_to && (
                         <div className="reply-quote" style={{ cursor: "pointer" }} title="Перейти к сообщению"
                           onClick={(e) => { e.stopPropagation(); scrollToMsg(m.reply_to.id); }}>
@@ -2123,6 +2241,7 @@ export default function App() {
                         </div>
                       )}
                       <div className="b-meta">
+                        {m.edited_at && <span style={{ opacity: 0.7, marginRight: 4 }}>изменено</span>}
                         {fmtTime(m.created_at)}
                         {out && <span className={`ticks${othersRead ? " read" : ""}`}>✓✓</span>}
                       </div>
@@ -2145,6 +2264,12 @@ export default function App() {
             </div>
           ) : (
           <div className="composer">
+            {editing && (
+              <div className="reply-bar" style={{ borderLeftColor: "#E0A040" }}>
+                <span style={{ color: "#E0A040" }}>✏️ Редактирование</span>
+                <button className="icon-btn" style={{ fontSize: 13, marginLeft: "auto" }} onClick={() => { setEditing(null); setDraft(""); }}>✕</button>
+              </div>
+            )}
             {replyTo && (
               <div className="reply-bar">
                 <span style={{ color: "var(--accent)" }}>↩ {senderName(replyTo)}:</span>
@@ -2404,10 +2529,12 @@ export default function App() {
           </div>
           <button onClick={() => { setReplyTo(menu.msg); setMenu(null); taRef.current?.focus(); }}>↩ Ответить</button>
           {menu.msg.type === "text" && <button onClick={() => { navigator.clipboard?.writeText(menu.msg.content); setMenu(null); }}>📋 Копировать</button>}
-          <button onClick={() => pinMsg(menu.msg)}>📌 {activeChat?.pinned_msg === menu.msg.id ? "Открепить" : "Закрепить"}</button>
+          <button onClick={() => pinMsg(menu.msg)}>📌 {(activeChat?.pinned_msgs || (activeChat?.pinned_msg ? [activeChat.pinned_msg] : [])).includes(menu.msg.id) ? "Открепить" : "Закрепить"}</button>
           {menu.msg.sender_id === me.id && isGroup && <button onClick={() => { const m = menu.msg; setMenu(null); setReadersFor(m); }}>👁 Кто прочитал</button>}
           {Object.keys(menu.msg.reactions || {}).length > 0 && <button onClick={() => { const m = menu.msg; setMenu(null); setReactViewer(m); }}>👀 Кто поставил реакции</button>}
           {menu.msg.sender_id !== me.id && <button onClick={() => { const m = menu.msg; setMenu(null); reportMsg(m); }}>🚩 Пожаловаться</button>}
+          {menu.msg.sender_id === me.id && menu.msg.type === "text" && <button onClick={() => { setEditing(menu.msg); setDraft(menu.msg.content); setMenu(null); taRef.current?.focus(); }}>✏️ Изменить</button>}
+          <button onClick={() => { const m = menu.msg; setMenu(null); setForwarding(m); }}>↪ Переслать</button>
           {menu.msg.sender_id === me.id && <button style={{ color: "#E26060" }} onClick={() => deleteMsg(menu.msg)}>🗑 Удалить</button>}
           <button className="menu-close" onClick={() => setMenu(null)}>✕ Закрыть</button>
         </div>
@@ -2641,7 +2768,7 @@ export default function App() {
               <div className="banner" style={bannerCss(peer)}>
                 <Avatar user={peer} size="lg" />
               </div>
-              <div className="modal-pad" style={{ paddingTop: 58, background: peer.profile_bg || undefined }}>
+              <div className="modal-pad" style={{ paddingTop: 58, ...(parseFill(peer.profile_bg) || {}) }}>
                 <div style={{ fontWeight: 700, fontSize: 19, color: peer.name_color || undefined }}>{peer.login}{peer.status_emoji ? ` ${peer.status_emoji}` : ""}</div>
                 <div className="muted" style={{ fontSize: 14 }}>@{peer.tag} · {lastSeenText(peer)}</div>
                 {peer.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{peer.bio}</p>}
@@ -2675,7 +2802,7 @@ export default function App() {
                 <Avatar user={me} size="lg" />
               </div>
             </div>
-            <div className="modal-pad" style={{ paddingTop: 58, background: me.profile_bg || undefined }}>
+            <div className="modal-pad" style={{ paddingTop: 58, ...(parseFill(me.profile_bg) || {}) }}>
               <div style={{ fontWeight: 700, fontSize: 19, color: me.name_color || undefined }}>{me.login}</div>
               <div className="muted" style={{ fontSize: 14, marginBottom: 10 }}>@{me.tag} · нажмите на аватар, чтобы сменить</div>
               <button className="btn ghost" style={{ marginBottom: 10 }} onClick={() => setProfilePreview(true)}>👁 Предпросмотр профиля</button>
@@ -2739,6 +2866,34 @@ export default function App() {
                       <button className="btn ghost" style={{ flex: 1 }} onClick={() => saveProfile({ profile_bg: gcss })}>→ В фон профиля</button>
                     </div>
                   </>);
+                })()}
+
+                <h3>Текстуры</h3>
+                <div className="swatches" style={{ alignItems: "center" }}>
+                  <span className="muted" style={{ fontSize: 12, width: 48 }}>цвета:</span>
+                  <ColorDot value={(prefs.tex || {}).base || "#1d2733"} title="Фон текстуры" onCommit={(v) => setPrefsAnd({ tex: { ...(prefs.tex || {}), base: v } })} />
+                  <ColorDot value={(prefs.tex || {}).color || "#3a4a5a"} title="Цвет узора" onCommit={(v) => setPrefsAnd({ tex: { ...(prefs.tex || {}), color: v } })} />
+                </div>
+                <div className="tex-grid">
+                  {TEXTURES.map((tx) => {
+                    const g = prefs.tex || {};
+                    const st = textureCss(tx.id, g.color || "#3a4a5a", g.base || "#1d2733");
+                    return (
+                      <div key={tx.id} className={`tex-cell${(g.id === tx.id) ? " sel" : ""}`}
+                        style={st} title={tx.name}
+                        onClick={() => setPrefsAnd({ tex: { ...(prefs.tex || {}), id: tx.id } })} />
+                    );
+                  })}
+                </div>
+                {(prefs.tex || {}).id && (() => {
+                  const g = prefs.tex || {};
+                  const val = `tex:|${g.id}|${g.color || "#3a4a5a"}|${g.base || "#1d2733"}`;
+                  return (
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <button className="btn ghost" style={{ flex: 1 }} onClick={() => saveProfile({ banner_color: val, banner_img: null })}>→ В баннер</button>
+                      <button className="btn ghost" style={{ flex: 1 }} onClick={() => saveProfile({ profile_bg: val })}>→ В фон профиля</button>
+                    </div>
+                  );
                 })()}
                 <p className="stat">Первый кружок — фон карточки под баннером, второй — цвет имени. Это видят все, кто откроет ваш профиль.</p>
                 <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
@@ -2923,7 +3078,7 @@ export default function App() {
             <div className="banner" style={bannerCss(showMember)}>
               <Avatar user={showMember} size="lg" />
             </div>
-            <div className="modal-pad" style={{ paddingTop: 58, background: showMember.profile_bg || undefined }}>
+            <div className="modal-pad" style={{ paddingTop: 58, ...(parseFill(showMember.profile_bg) || {}) }}>
               <div style={{ fontWeight: 700, fontSize: 19, color: showMember.name_color || undefined }}>{showMember.login}</div>
               <div className="muted" style={{ fontSize: 14 }}>@{showMember.tag} · {lastSeenText(showMember)}</div>
               {showMember.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{showMember.bio}</p>}
@@ -3160,7 +3315,7 @@ export default function App() {
             <div className="banner" style={bannerCss(me)}>
               <Avatar user={me} size="lg" />
             </div>
-            <div className="modal-pad" style={{ paddingTop: 58, background: me.profile_bg || undefined }}>
+            <div className="modal-pad" style={{ paddingTop: 58, ...(parseFill(me.profile_bg) || {}) }}>
               <div style={{ fontWeight: 700, fontSize: 19, color: me.name_color || undefined }}>{me.login}{me.status_emoji ? ` ${me.status_emoji}` : ""}</div>
               <div className="muted" style={{ fontSize: 14 }}>@{me.tag} · {lastSeenText(me)}</div>
               {me.bio && <p style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.4 }}>{me.bio}</p>}
@@ -3558,6 +3713,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {forwarding && <ForwardPicker />}
 
       {/* ТОСТ */}
       {toast && (

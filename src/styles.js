@@ -379,4 +379,9 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
 
 .report-card { background: var(--input); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
 .report-card.done { opacity: 0.5; }
+
+.tex-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-top: 8px; }
+.tex-cell { aspect-ratio: 1; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
+.tex-cell.sel { border-color: var(--accent); }
+.fwd-label { font-size: 12px; color: var(--accent); opacity: 0.85; margin-bottom: 3px; font-style: italic; }
 `;
