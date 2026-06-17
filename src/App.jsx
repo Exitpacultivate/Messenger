@@ -275,6 +275,11 @@ export default function App() {
   const [callNet, setCallNet] = useState("");
   const [callMin, setCallMin] = useState(false);
   const [activePack, setActivePack] = useState(0);
+  const [showOnboard, setShowOnboard] = useState(false);
+  const [scheduleAt, setScheduleAt] = useState(null);
+  const [marketSort, setMarketSort] = useState("likes"); // likes | downloads | new
+  const [myLikes, setMyLikes] = useState(new Set());
+  const [mySubs, setMySubs] = useState(new Set());
   const [callDiag, setCallDiag] = useState({ ice: "", gather: "", cands: 0, relay: 0, turn: TURN_URLS.length });
   const [, setCallTick] = useState(0);
   const [showMenu, setShowMenu] = useState(false);
@@ -353,6 +358,7 @@ export default function App() {
   const builderImgFor = useRef(null);
   const builderImgInp = useRef(null);
   const sideBgInp = useRef(null);
+  const emojiPackInp = useRef(null);
   const themeMediaInp = useRef(null);
   const stickerInp = useRef(null);
   const originalRef = useRef(false);
@@ -544,6 +550,11 @@ export default function App() {
 
   // ---------- СТАРТ ----------
   useEffect(() => {
+    supabase.rpc("release_scheduled").then(() => {}).catch(() => {});
+    const t = setInterval(() => supabase.rpc("release_scheduled").then(() => {}).catch(() => {}), 60000);
+    return () => clearInterval(t);
+  }, []);
+  useEffect(() => {
     if (!configured) { setPhase("config"); return; }
     (async () => {
       const { data: { session } } = await supabase.auth.getSession();
@@ -555,6 +566,7 @@ export default function App() {
       cacheProfiles([prof]);
       await loadEverything(prof);
       setPhase("main");
+      if (!prof.onboarded) setShowOnboard(true);
     })();
   }, [loadEverything, cacheProfiles]);
 
@@ -589,6 +601,7 @@ export default function App() {
             maybeNotify(m);
           }
         }
+        if (m.scheduled_at && new Date(m.scheduled_at) > new Date() && m.sender_id !== me.id) return;
         setMessages((d) => {
           const list = d[m.chat_id] || [];
           if (list.some((x) => x.id === m.id)) return d;
@@ -945,6 +958,7 @@ export default function App() {
     setMe(meNow); cacheProfiles([meNow]);
     await loadEverything(meNow);
     setPhase("main"); setPass(""); setPass2("");
+    setShowOnboard(true);
   }
   async function logout() {
     await supabase.auth.signOut();
@@ -1460,9 +1474,35 @@ export default function App() {
   }
   async function openMarket() {
     setShowMenu(false); setShowMarket(true); setThemeOpen(null); setPublishForm(null); setThemes(null);
-    const { data, error } = await supabase.from("themes").select("*").order("downloads", { ascending: false }).limit(100);
-    if (error) { notify("Маркет недоступен: выполните миграции v12 и v13."); setThemes([]); return; }
+    const col = marketSort === "downloads" ? "downloads" : marketSort === "new" ? "created_at" : "likes";
+    const { data, error } = await supabase.from("themes").select("*").order(col, { ascending: false }).limit(100);
+    if (error) { notify("Маркет недоступен: выполните миграции v12, v13 и v19."); setThemes([]); return; }
     setThemes(data || []);
+    const [{ data: likes }, { data: subs }] = await Promise.all([
+      supabase.from("theme_likes").select("theme_id").eq("user_id", me.id),
+      supabase.from("author_subs").select("author").eq("follower", me.id),
+    ]);
+    setMyLikes(new Set((likes || []).map((x) => x.theme_id)));
+    setMySubs(new Set((subs || []).map((x) => x.author)));
+  }
+  useEffect(() => { if (showMarket && !themeOpen && !publishForm) openMarket();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketSort]);
+  async function toggleLike(t) {
+    const liked = myLikes.has(t.id);
+    setMyLikes((st) => { const n = new Set(st); liked ? n.delete(t.id) : n.add(t.id); return n; });
+    setThemes((l) => (l || []).map((x) => x.id === t.id ? { ...x, likes: (x.likes || 0) + (liked ? -1 : 1) } : x));
+    const { data } = await supabase.rpc("toggle_theme_like", { tid: t.id });
+    if (typeof data === "number") setThemes((l) => (l || []).map((x) => x.id === t.id ? { ...x, likes: data } : x));
+  }
+  async function toggleSub(authorId, authorLogin) {
+    const subbed = mySubs.has(authorId);
+    const { error } = subbed
+      ? await supabase.from("author_subs").delete().eq("author", authorId).eq("follower", me.id)
+      : await supabase.from("author_subs").insert({ author: authorId, follower: me.id });
+    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    setMySubs((st) => { const n = new Set(st); subbed ? n.delete(authorId) : n.add(authorId); return n; });
+    notify(subbed ? "Вы отписались" : `Вы подписались на ${authorLogin || "автора"} ✓`);
   }
   function startPublish() {
     setPublishForm({ title: "", description: "", platform: "both", tags: "", media: [] });
@@ -1652,6 +1692,7 @@ export default function App() {
       reply_to: replyTo ? { id: replyTo.id, name: senderName(replyTo), text: previewOf(replyTo) } : null,
       ...(payload._forwarded ? { forwarded: payload._forwarded } : {}),
       ...(expireSec ? { expires_at: new Date(Date.now() + expireSec * 1000).toISOString() } : {}),
+      ...(scheduleAt ? { scheduled_at: scheduleAt } : {}),
       ...payload,
     };
     setReplyTo(null);
@@ -1678,6 +1719,7 @@ export default function App() {
     if (text == null) {
       setDraft("");
       setMentionQuery(null);
+      if (scheduleAt) { setScheduleAt(null); notify("Сообщение запланировано ✓"); }
       if (taRef.current) taRef.current.style.height = "auto";
       setPrefsAnd({ drafts: { ...prefs.drafts, [activeId]: "" } });
     }
@@ -2133,16 +2175,21 @@ export default function App() {
           </div>
         )}
         <div className="folder-tabs">
-          <button className={`ftab${activeFolder === "all" ? " on" : ""}`} onClick={() => setActiveFolder("all")}>Все</button>
+          {(() => { const u = chats.reduce((a, c) => a + (isMuted(c.id) ? 0 : unreadCount(c)), 0); return (
+            <button className={`ftab${activeFolder === "all" ? " on" : ""}`} onClick={() => setActiveFolder("all")}>Все{u > 0 ? ` ${u}` : ""}</button>
+          ); })()}
           {friends.size > 0 && (
             <button className={`ftab${activeFolder === "__friends" ? " on" : ""}`} onClick={() => setActiveFolder("__friends")}>Друзья</button>
           )}
-          {(prefs.folders || []).map((f) => (
-            <button key={f.id} className={`ftab${activeFolder === f.id ? " on" : ""}`}
-              onClick={() => (activeFolder === f.id ? openFolderEditor(f) : setActiveFolder(f.id))}>
-              {f.name}{activeFolder === f.id ? " ✏️" : ""}
-            </button>
-          ))}
+          {(prefs.folders || []).map((f) => {
+            const u = (f.chatIds || []).reduce((a, id) => { const c = chats.find((x) => x.id === id); return a + (c && !isMuted(id) ? unreadCount(c) : 0); }, 0);
+            return (
+              <button key={f.id} className={`ftab${activeFolder === f.id ? " on" : ""}`}
+                onClick={() => (activeFolder === f.id ? openFolderEditor(f) : setActiveFolder(f.id))}>
+                {f.name}{u > 0 ? ` ${u}` : ""}{activeFolder === f.id ? " ✏️" : ""}
+              </button>
+            );
+          })}
           {(prefs.archived || []).length > 0 && (
             <button className={`ftab${activeFolder === "__archive" ? " on" : ""}`} onClick={() => setActiveFolder("__archive")}>🗄 Архив</button>
           )}
@@ -2376,6 +2423,7 @@ export default function App() {
                           {Object.entries(m.reactions).map(([e, ids]) => (
                             <button key={e} className={`react-chip${ids.includes(me.id) ? " mine" : ""}`}
                               onClick={() => { if (suppressClick.current) { suppressClick.current = false; return; } toggleReaction(m, e); }}
+                              data-img={e.startsWith("img:") ? "1" : undefined}
                               onContextMenu={(ev) => { ev.preventDefault(); ev.stopPropagation(); setReactViewer(m); }}
                               onTouchStart={(ev) => {
                                 ev.stopPropagation();
@@ -2383,7 +2431,7 @@ export default function App() {
                               }}
                               onTouchMove={() => clearTimeout(lpChat.current)}
                               onTouchEnd={() => clearTimeout(lpChat.current)}>
-                              {e} {ids.length}
+                              {e.startsWith("img:") ? <img src={e.slice(4)} alt="" style={{ width: 16, height: 16, objectFit: "contain", verticalAlign: "middle" }} /> : e} {ids.length}
                             </button>
                           ))}
                         </div>
@@ -2491,7 +2539,7 @@ export default function App() {
                 );
               })()}
               {showEmoji && (
-                <div className="emoji-pop">
+                <div className="emoji-pop emoji-pop-wide">
                   <button className="pop-x" onClick={() => setShowEmoji(false)}>✕</button>
                   <div className="emoji-tabs">
                     {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
@@ -2509,6 +2557,15 @@ export default function App() {
                   <button onClick={() => { const opts = [0, 5, 30, 300, 3600]; const cur = opts.indexOf(expireSec); setExpireSec(opts[(cur + 1) % opts.length]); }}>
                     ⏱ Исчезающие: {expireSec === 0 ? "выкл" : expireSec < 60 ? `${expireSec} сек` : expireSec < 3600 ? `${expireSec / 60} мин` : "1 час"}
                   </button>
+                  <button onClick={() => {
+                    setShowAttach(false);
+                    const v = window.prompt("Через сколько минут отправить? (например 30, или 0 чтобы отменить):", "30");
+                    if (v === null) return;
+                    const min = parseInt(v, 10);
+                    if (!min) { setScheduleAt(null); notify("Отложенная отправка отключена"); return; }
+                    setScheduleAt(new Date(Date.now() + min * 60000).toISOString());
+                    notify(`Следующее сообщение уйдёт через ${min} мин`);
+                  }}>🕓 Отложить отправку{scheduleAt ? " ✓" : ""}</button>
                   <button onClick={startVoice}>🎤 Голосовое сообщение</button>
                 </div>
               )}
@@ -2716,10 +2773,21 @@ export default function App() {
               <h3 style={{ marginTop: 0 }}>Выберите реакцию</h3>
               <div className="emoji-tabs">
                 {Object.keys(EMOJI).map((t) => <button key={t} className={t === emojiTab ? "sel" : ""} onClick={() => setEmojiTab(t)}>{t}</button>)}
+                {(prefs.emojiPacks || []).length > 0 && <button className={emojiTab === "★" ? "sel" : ""} onClick={() => setEmojiTab("★")}>★</button>}
               </div>
-              <div className="emoji-grid">
-                {EMOJI[emojiTab].map((e) => <button key={e} onClick={() => { toggleReaction(reactFor, e); setReactFor(null); }}>{e}</button>)}
-              </div>
+              {emojiTab === "★" ? (
+                <div className="emoji-grid">
+                  {(prefs.emojiPacks || []).map((url, i) => (
+                    <button key={i} onClick={() => { toggleReaction(reactFor, "img:" + url); setReactFor(null); }} style={{ padding: 2 }}>
+                      <img src={url} alt="" style={{ width: 28, height: 28, objectFit: "contain" }} />
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="emoji-grid">
+                  {EMOJI[emojiTab].map((e) => <button key={e} onClick={() => { toggleReaction(reactFor, e); setReactFor(null); }}>{e}</button>)}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -3202,6 +3270,25 @@ export default function App() {
                 <input className="field" placeholder="Текст автоответа (пусто — выключен)" maxLength={200} defaultValue={me.auto_reply || ""}
                   onBlur={(e) => { const v = e.target.value.trim(); if (v !== (me.auto_reply || "")) saveProfile({ auto_reply: v || null }); }} />
                 <p className="stat">Автоматически отвечает на первое сообщение в личке, не чаще раза в 5 минут на чат.</p>
+                <h3>😎 Свои эмодзи для реакций</h3>
+                <input ref={emojiPackInp} type="file" accept="image/*" hidden onChange={async (e) => {
+                  const f = e.target.files[0]; e.target.value = "";
+                  if (!f) return;
+                  try {
+                    const url = f.type === "image/gif" ? await uploadMedia(f, "gif", "image/gif") : await uploadMedia(await resizeToBlob(f, 96, 0.85), "png", "image/png");
+                    setPrefsAnd({ emojiPacks: [...(prefs.emojiPacks || []), url].slice(-40) });
+                  } catch { notify("Не удалось добавить."); }
+                }} />
+                <div className="swatches">
+                  {(prefs.emojiPacks || []).map((url, i) => (
+                    <div key={i} style={{ position: "relative" }}>
+                      <img src={url} alt="" style={{ width: 32, height: 32, objectFit: "contain", borderRadius: 6 }} />
+                      <button className="st-del" style={{ opacity: 1 }} onClick={() => setPrefsAnd({ emojiPacks: prefs.emojiPacks.filter((_, k) => k !== i) })}>✕</button>
+                    </div>
+                  ))}
+                  <button className="sticker-add" style={{ width: 32, height: 32, fontSize: 18 }} onClick={() => emojiPackInp.current?.click()}>＋</button>
+                </div>
+                <p className="stat">Свои картинки можно ставить как реакции (кнопка ＋ в меню реакций → вкладка ★).</p>
                 <h3>🌐 Язык интерфейса</h3>
                 <div className="quick-chips">
                   {LANGS.map((l) => <button key={l.id} className={`chip${(prefs.lang || "ru") === l.id ? " chip-on" : ""}`} onClick={() => setPrefsAnd({ lang: l.id })}>{l.name}</button>)}
@@ -3251,6 +3338,15 @@ export default function App() {
                 <button className="btn ghost" onClick={exportData}>⬇ Экспорт данных</button>
                 <button className="btn" style={{ background: "#D9534F" }} onClick={logout}>Выйти</button>
               </div>
+              <button className="btn ghost" style={{ marginTop: 10, color: "#D9534F", width: "100%" }}
+                onClick={async () => {
+                  if (!window.confirm("Удалить аккаунт навсегда? Все ваши сообщения, чаты и темы будут удалены без возможности восстановления.")) return;
+                  if (!window.confirm("Это действие необратимо. Точно удалить аккаунт?")) return;
+                  const { error } = await supabase.rpc("delete_my_account");
+                  if (error) { notify(`Не удалось удалить: ${error.message}`); return; }
+                  await supabase.auth.signOut();
+                  setMe(null); setPhase("auth");
+                }}>🗑 Удалить аккаунт навсегда</button>
             </div>
           </div>
         </div>
@@ -3615,10 +3711,22 @@ export default function App() {
                         : <img key={idx} src={m.url} alt="" onClick={() => setViewer(m.url)} />)}
                     </div>
                   )}
-                  <div className="member-row" style={{ cursor: "pointer", padding: "8px 0" }} onClick={() => openAuthor(t)}>
-                    <Avatar user={profiles[t.author] || { tag: t.author_login || "?" }} size="sm" />
-                    <span className="mr-name">от <b>{t.author_login || "?"}</b><div className="muted" style={{ fontSize: 12 }}>открыть профиль →</div></span>
-                    <span className="muted">⬇ {t.downloads}</span>
+                  <div className="member-row" style={{ padding: "8px 0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "pointer" }} onClick={() => openAuthor(t)}>
+                      <Avatar user={profiles[t.author] || { tag: t.author_login || "?" }} size="sm" />
+                      <span className="mr-name">от <b>{t.author_login || "?"}</b><div className="muted" style={{ fontSize: 12 }}>открыть профиль →</div></span>
+                    </div>
+                    {t.author !== me.id && (
+                      <button className={`chip${mySubs.has(t.author) ? " chip-on" : ""}`} onClick={() => toggleSub(t.author, t.author_login)}>
+                        {mySubs.has(t.author) ? "✓ Вы подписаны" : "+ Подписаться"}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 6 }}>
+                    <button className="chip" onClick={() => toggleLike(t)} style={myLikes.has(t.id) ? { background: "#e0245e", color: "#fff" } : {}}>
+                      {myLikes.has(t.id) ? "❤" : "🤍"} {t.likes || 0}
+                    </button>
+                    <span className="muted" style={{ fontSize: 13 }}>⬇ {t.downloads} установок</span>
                   </div>
                   <span className="plat-chip">{platLabel[t.platform] || platLabel.both}</span>
                   {t.description && <p style={{ fontSize: 14.5, lineHeight: 1.45, marginTop: 10 }}>{t.description}</p>}
@@ -3642,6 +3750,11 @@ export default function App() {
                 <div className="folder-tabs" style={{ padding: "0 0 8px" }}>
                   {[["all", "Все"], ["pc", "💻 ПК"], ["mobile", "📱 Телефон"]].map(([v, l]) => (
                     <button key={v} className={`ftab${marketTab === v ? " on" : ""}`} onClick={() => setMarketTab(v)}>{l}</button>
+                  ))}
+                </div>
+                <div className="folder-tabs" style={{ padding: "0 0 8px" }}>
+                  {[["likes", "🔥 Популярные"], ["new", "🆕 Новые"], ["downloads", "⬇ Загружаемые"]].map(([v, l]) => (
+                    <button key={v} className={`ftab${marketSort === v ? " on" : ""}`} onClick={() => setMarketSort(v)}>{l}</button>
                   ))}
                 </div>
                 <input className="field" placeholder="Поиск по названию и тегам…" value={marketQuery} onChange={(e) => setMarketQuery(e.target.value)} />
@@ -3669,7 +3782,7 @@ export default function App() {
                               </div>
                               <div className="tc-info">
                                 <b>{t.title}</b>
-                                <div className="muted" style={{ fontSize: 12 }}>{t.author_login || "?"} · ⬇ {t.downloads}</div>
+                                <div className="muted" style={{ fontSize: 12 }}>{t.author_login || "?"} · ⬇ {t.downloads} · ❤ {t.likes || 0}</div>
                               </div>
                             </div>
                           );
@@ -3951,6 +4064,30 @@ export default function App() {
       )}
 
       {forwarding && <ForwardPicker />}
+
+      {/* ОНБОРДИНГ */}
+      {showOnboard && (
+        <div className="overlay" style={{ zIndex: 95 }}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad" style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 44, marginBottom: 6 }}>👋</div>
+              <h3 style={{ marginTop: 0 }}>Добро пожаловать!</h3>
+              <div style={{ textAlign: "left", fontSize: 14.5, lineHeight: 1.7, margin: "10px 0" }}>
+                <p>🔍 <b>Поиск сверху</b> — найдите друзей по @тегу или каналы по названию.</p>
+                <p>☰ <b>Меню слева</b> — группы, каналы, контакты, звонки, настройки.</p>
+                <p>🎛 <b>Конструктор</b> — настройте мессенджер под себя: цвета, шрифты, иконки.</p>
+                <p>🛍 <b>Маркет тем</b> — установите готовое оформление или выложите своё.</p>
+                <p>⚙️ Не забудьте задать <b>резервный код</b> в настройках — пригодится, если забудете пароль.</p>
+              </div>
+              <button className="btn" onClick={async () => {
+                setShowOnboard(false);
+                await supabase.from("profiles").update({ onboarded: true }).eq("id", me.id);
+                setMe((m) => ({ ...m, onboarded: true }));
+              }}>Начать общение</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ТОСТ */}
       {toast && (

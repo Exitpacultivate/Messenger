@@ -415,4 +415,15 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
 .call-mini-btn.hang { background: #d9534f; }
 .call-minimize { position: absolute; top: 16px; left: 16px; z-index: 3; width: 40px; height: 40px;
   border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 24px; cursor: pointer; }
+
+/* Панель эмодзи в композере — над полем ввода, во всю ширину (как стикеры) */
+.emoji-pop-wide { left: 0 !important; right: 0; width: auto !important; bottom: 100% !important;
+  margin-bottom: 8px; max-height: 320px; overflow-y: auto; box-shadow: 0 -4px 24px rgba(0,0,0,0.3); }
+.emoji-pop-wide .emoji-grid { grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); }
+.emoji-pop-wide .emoji-grid button { font-size: 24px; }
+@media (max-width: 720px) {
+  .emoji-pop-wide { position: fixed; left: 0; right: 0; bottom: 0 !important; margin: 0; max-height: 50vh;
+    border-radius: 16px 16px 0 0; }
+  .emoji-pop-wide .emoji-grid { grid-template-columns: repeat(8, 1fr); }
+}
 `;
