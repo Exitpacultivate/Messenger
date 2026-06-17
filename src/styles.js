@@ -77,7 +77,7 @@ button:active { transform: scale(0.88); }
 .bubble.out .b-meta { color: rgba(255,255,255,0.75); }
 .tg[data-theme="light"] .bubble.out .b-meta { color: var(--muted); }
 .ticks { letter-spacing: -2px; }
-.ticks.read { color: var(--accent); font-weight: 700; }
+.ticks.read { color: #4fc3f7; opacity: 1; font-weight: 700; }
 .reply-quote { border-left: 2.5px solid var(--accent); padding: 2px 8px; margin-bottom: 4px;
   font-size: 13px; border-radius: 4px; background: rgba(128,128,128,0.12); }
 .reply-quote b { color: var(--accent); display: block; font-size: 12.5px; }
@@ -384,4 +384,35 @@ button:hover .anim-shake, button:active .anim-shake { animation: aShake 0.4s eas
 .tex-cell { aspect-ratio: 1; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
 .tex-cell.sel { border-color: var(--accent); }
 .fwd-label { font-size: 12px; color: var(--accent); opacity: 0.85; margin-bottom: 3px; font-style: italic; }
+
+/* Большая панель стикеров — сверху панели ввода, на всю ширину */
+.sticker-panel { position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 8px;
+  background: var(--side); border: 1px solid var(--line); border-radius: 14px;
+  max-height: 340px; display: flex; flex-direction: column; overflow: hidden; z-index: 20;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.3); }
+.sticker-panel-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.sticker-tabs { display: flex; gap: 6px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+.sticker-tabs::-webkit-scrollbar { display: none; }
+.sticker-tab { background: var(--input); border: none; color: var(--text); font-size: 13px;
+  padding: 5px 12px; border-radius: 12px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+.sticker-tab.on { background: var(--accent); color: #fff; }
+.sticker-grid-big { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 10px;
+  padding: 12px; overflow-y: auto; }
+.sticker-grid-big .sticker-cell img { width: 100%; aspect-ratio: 1; object-fit: contain; cursor: pointer; }
+.sticker-pack-del { background: none; border: none; color: #E26060; font-size: 12.5px; padding: 8px; cursor: pointer; border-top: 1px solid var(--line); }
+/* На телефоне панель стикеров замещает ввод (как в Telegram) */
+@media (max-width: 720px) {
+  .sticker-panel { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; max-height: 52vh;
+    border-radius: 16px 16px 0 0; }
+  .sticker-grid-big { grid-template-columns: repeat(4, 1fr); }
+}
+/* Свёрнутый звонок */
+.call-mini { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 95;
+  display: flex; align-items: center; gap: 10px; background: var(--side); border: 1px solid var(--line);
+  border-radius: 30px; padding: 8px 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); cursor: pointer; min-width: 260px; }
+.call-mini-btn { width: 38px; height: 38px; border-radius: 50%; border: none; background: var(--input);
+  font-size: 16px; cursor: pointer; }
+.call-mini-btn.hang { background: #d9534f; }
+.call-minimize { position: absolute; top: 16px; left: 16px; z-index: 3; width: 40px; height: 40px;
+  border-radius: 50%; border: none; background: rgba(255,255,255,0.15); color: #fff; font-size: 24px; cursor: pointer; }
 `;

@@ -36,16 +36,32 @@ const ICE_SERVERS = [
   }] : []),
 ];
 const TEXTURES = [
-  { id: "dots", name: "Точки", make: (c) => `radial-gradient(${c} 1.4px, transparent 1.5px) 0 0 / 14px 14px` },
-  { id: "grid", name: "Сетка", make: (c) => `linear-gradient(${c} 1px, transparent 1px) 0 0 / 20px 20px, linear-gradient(90deg, ${c} 1px, transparent 1px) 0 0 / 20px 20px` },
-  { id: "diag", name: "Полоски", make: (c) => `repeating-linear-gradient(45deg, ${c} 0 2px, transparent 2px 12px)` },
-  { id: "cross", name: "Крестики", make: (c) => `repeating-linear-gradient(45deg, ${c} 0 1px, transparent 1px 16px), repeating-linear-gradient(-45deg, ${c} 0 1px, transparent 1px 16px)` },
-  { id: "zigzag", name: "Зигзаг", make: (c) => `repeating-linear-gradient(135deg, ${c} 0 2px, transparent 2px 9px)` },
-  { id: "checker", name: "Шахматы", make: (c) => `repeating-conic-gradient(${c} 0 25%, transparent 0 50%) 0 0 / 24px 24px` },
+  // Геометрические (узор задаётся цветом)
+  { id: "dots", name: "Точки", kind: "pattern", make: (c) => `radial-gradient(${c} 1.4px, transparent 1.5px) 0 0 / 14px 14px` },
+  { id: "grid", name: "Сетка", kind: "pattern", make: (c) => `linear-gradient(${c} 1px, transparent 1px) 0 0 / 20px 20px, linear-gradient(90deg, ${c} 1px, transparent 1px) 0 0 / 20px 20px` },
+  { id: "diag", name: "Полоски", kind: "pattern", make: (c) => `repeating-linear-gradient(45deg, ${c} 0 2px, transparent 2px 12px)` },
+  { id: "zigzag", name: "Зигзаг", kind: "pattern", make: (c) => `repeating-linear-gradient(135deg, ${c} 0 2px, transparent 2px 9px)` },
+  // Материалы (самодостаточные, цвет узора игнорируется)
+  { id: "wood", name: "Дерево", kind: "material", make: () =>
+    `repeating-linear-gradient(90deg, #6b4423 0 3px, #7a4f29 3px 5px, #5e3b1e 5px 8px, #76492705 8px 26px), repeating-linear-gradient(89deg, #00000018 0 1px, transparent 1px 40px)`,
+    base: "#6b4423" },
+  { id: "marble", name: "Мрамор", kind: "material", make: () =>
+    `radial-gradient(ellipse 60% 40% at 30% 30%, #ffffff35, transparent 60%), radial-gradient(ellipse 50% 30% at 70% 65%, #c8c8d020, transparent 55%), repeating-linear-gradient(48deg, transparent 0 22px, #9aa0b015 22px 23px, transparent 23px 30px), repeating-linear-gradient(-50deg, transparent 0 40px, #88889018 40px 41px, transparent 41px 60px)`,
+    base: "#e8eaf0" },
+  { id: "stone", name: "Камень", kind: "material", make: () =>
+    `radial-gradient(circle at 20% 30%, #00000022 0 2px, transparent 3px), radial-gradient(circle at 60% 70%, #00000018 0 3px, transparent 4px), radial-gradient(circle at 80% 20%, #ffffff10 0 2px, transparent 3px), repeating-conic-gradient(#6e6e6e10 0 8%, transparent 0 16%) 0 0 / 30px 30px`,
+    base: "#7d7d7d" },
+  { id: "water", name: "Вода", kind: "material", make: () =>
+    `radial-gradient(ellipse 70% 50% at 40% 30%, #7fd0ff40, transparent 60%), repeating-linear-gradient(8deg, #2b8fd010 0 6px, #4aa8e818 6px 12px, transparent 12px 22px), repeating-linear-gradient(-6deg, transparent 0 14px, #aee4ff20 14px 16px, transparent 16px 30px)`,
+    base: "#2b7fc0" },
+  { id: "granite", name: "Гранит", kind: "material", make: () =>
+    `radial-gradient(circle at 15% 25%, #ffffff18 0 1.5px, transparent 2px), radial-gradient(circle at 45% 60%, #00000030 0 1.5px, transparent 2px), radial-gradient(circle at 75% 35%, #d0a0a020 0 2px, transparent 3px), radial-gradient(circle at 60% 85%, #ffffff14 0 1px, transparent 2px), repeating-conic-gradient(#55555512 0 10%, transparent 0 20%) 0 0 / 18px 18px`,
+    base: "#4a4a52" },
 ];
 const textureCss = (texId, texColor, baseColor) => {
   const t = TEXTURES.find((x) => x.id === texId);
   if (!t) return null;
+  if (t.kind === "material") return { backgroundColor: t.base, backgroundImage: t.make(), backgroundSize: "120px 120px, cover" };
   return { backgroundColor: baseColor || "#1d2733", backgroundImage: t.make(texColor || "rgba(255,255,255,0.12)") };
 };
 const blobToB64 = (blob) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
@@ -224,7 +240,7 @@ export default function App() {
   const [typingMap, setTypingMap] = useState({}); // chatId -> { userId: ts }
   const [activeId, setActiveId] = useState(null);
 
-  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, uiVars: {}, btnIcons: {}, btnAnim: {}, lang: "ru", stickers: [], chatPins: {}, ...loadPrefs() }));
+  const [prefs, setPrefs] = useState(() => ({ theme: "dark", accent: "#5AABF0", quickReplies: [], drafts: {}, wallpaper: 0, customWallpaper: null, typeSound: false, muted: [], folders: [], dismissedAnn: 0, font: "system", icon: "blue", nickColor: null, bubbleColor: null, callLog: [], msgSound: true, pinned: [], archived: [], unreadMarks: [], notifMode: {}, uiVars: {}, btnIcons: {}, btnAnim: {}, lang: "ru", stickers: [], chatPins: {}, wpFit: "cover", recentReacts: [], emojiPacks: [], ...loadPrefs() }));
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState(null);
   const [menu, setMenu] = useState(null);
@@ -257,6 +273,8 @@ export default function App() {
   const [callMuted, setCallMuted] = useState(false);
   const [callCamOff, setCallCamOff] = useState(false);
   const [callNet, setCallNet] = useState("");
+  const [callMin, setCallMin] = useState(false);
+  const [activePack, setActivePack] = useState(0);
   const [callDiag, setCallDiag] = useState({ ice: "", gather: "", cands: 0, relay: 0, turn: TURN_URLS.length });
   const [, setCallTick] = useState(0);
   const [showMenu, setShowMenu] = useState(false);
@@ -282,6 +300,8 @@ export default function App() {
   const [adminTarget, setAdminTarget] = useState(null);
   const [adminChats, setAdminChats] = useState([]);
   const [showJump, setShowJump] = useState(false);
+  const [activePinIdx, setActivePinIdx] = useState(0);
+  const [showPinList, setShowPinList] = useState(false);
   const [feedbackOn, setFeedbackOn] = useState(false);
   const [showMarket, setShowMarket] = useState(false);
   const [themes, setThemes] = useState(null);
@@ -332,6 +352,7 @@ export default function App() {
   const suppressClick = useRef(false);
   const builderImgFor = useRef(null);
   const builderImgInp = useRef(null);
+  const sideBgInp = useRef(null);
   const themeMediaInp = useRef(null);
   const stickerInp = useRef(null);
   const originalRef = useRef(false);
@@ -378,6 +399,8 @@ export default function App() {
   const hasRight = (r) => amOwner || (myRow?.role === "admin" && !!myRow?.rights?.[r]);
   const isChannel = !!activeChat?.is_channel;
   const amAppAdmin = !!me?.is_app_admin;
+  const amModerator = !!me?.is_moderator;
+  const amStaff = amAppAdmin || amModerator;
   const canPost = !isChannel || amOwner || myRow?.role === "admin";
 
   function notify(text) {
@@ -831,6 +854,7 @@ export default function App() {
       else if (editing) { setEditing(null); setDraft(""); }
       else if (mentionQuery !== null) setMentionQuery(null);
       else if (chatMenu) setChatMenu(null);
+      else if (showPinList) setShowPinList(false);
       else if (showStickers) setShowStickers(false);
       else if (statusPick) setStatusPick(false);
       else if (profilePreview) setProfilePreview(false);
@@ -1337,6 +1361,7 @@ export default function App() {
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
     candQueue.current = [];
     setCall(null);
+    setCallMin(false);
   }
   function toggleCallMute() {
     const tr = localStreamRef.current?.getAudioTracks()?.[0];
@@ -1382,14 +1407,44 @@ export default function App() {
     setMessages((d) => ({ ...d, [fb.id]: (msgs || []).reverse() }));
     (msgs || []).forEach((m) => ensureProfile(m.sender_id));
   }
-  async function addSticker(file) {
+  function stickerPacks() {
+    let packs = prefs.stickerPacks;
+    if (!packs) {
+      // миграция старого формата (plain массив) в один пак
+      packs = (prefs.stickers || []).length ? [{ id: "p0", name: "Мои стикеры", items: prefs.stickers }] : [];
+    }
+    return packs;
+  }
+  async function addStickerToPack(file, packIdx) {
     if (!file) return;
     try {
       const url = file.type === "image/gif"
         ? await uploadMedia(file, "gif", "image/gif")
         : await uploadMedia(await resizeToBlob(file, 320, 0.85), "png", "image/png");
-      setPrefsAnd({ stickers: [...(prefs.stickers || []), url].slice(-60) });
+      const packs = JSON.parse(JSON.stringify(stickerPacks()));
+      if (!packs.length) packs.push({ id: "p" + Date.now(), name: "Мои стикеры", items: [] });
+      const idx = Math.min(packIdx ?? 0, packs.length - 1);
+      packs[idx].items = [...packs[idx].items, url].slice(-120);
+      setPrefsAnd({ stickerPacks: packs, stickers: undefined });
     } catch { notify("Не удалось добавить стикер."); }
+  }
+  function newStickerPack() {
+    const name = window.prompt("Название стикерпака:");
+    if (!name?.trim()) return;
+    const packs = [...stickerPacks(), { id: "p" + Date.now(), name: name.trim().slice(0, 24), items: [] }];
+    setPrefsAnd({ stickerPacks: packs });
+    setActivePack(packs.length - 1);
+  }
+  function delStickerPack(idx) {
+    if (!window.confirm("Удалить этот стикерпак?")) return;
+    const packs = stickerPacks().filter((_, k) => k !== idx);
+    setPrefsAnd({ stickerPacks: packs });
+    setActivePack(0);
+  }
+  function delStickerFromPack(packIdx, itemIdx) {
+    const packs = JSON.parse(JSON.stringify(stickerPacks()));
+    packs[packIdx].items = packs[packIdx].items.filter((_, k) => k !== itemIdx);
+    setPrefsAnd({ stickerPacks: packs });
   }
   function sendSticker(url) {
     setShowStickers(false);
@@ -1480,16 +1535,39 @@ export default function App() {
   async function setRestriction(u, key, val) {
     const r = { ...(u.restrictions || {}) };
     if (val) r[key] = true; else delete r[key];
-    const { error } = await supabase.rpc("admin_set_restrictions", { uid: u.id, r });
+    const { error } = await supabase.rpc("staff_set_restrictions", { uid: u.id, r });
     if (error) { notify(`Не удалось: ${error.message}`); return; }
     const next = { ...u, restrictions: r };
     cacheProfiles([next]);
     setAdminTarget(next);
+    logMod(val ? "restrict" : "unrestrict", u, key);
+  }
+  async function toggleModerator(u) {
+    const val = !u.is_moderator;
+    const { error } = await supabase.rpc("admin_set_moderator", { uid: u.id, val });
+    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    const next = { ...u, is_moderator: val };
+    cacheProfiles([next]); setAdminTarget(next);
+    notify(val ? `${u.login} — теперь модератор ✓` : `${u.login} снят с модераторов`);
+  }
+  async function warnUser(u) {
+    const msg = window.prompt("Текст предупреждения пользователю:");
+    if (!msg?.trim()) return;
+    const { error } = await supabase.rpc("staff_warn", { uid: u.id, msg: msg.trim() });
+    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    const next = { ...u, warnings: (u.warnings || 0) + 1 };
+    cacheProfiles([next]); setAdminTarget(next);
+    notify("Предупреждение выдано ⚠️");
+  }
+  async function logMod(action, u, details) {
+    await supabase.from("mod_log").insert({
+      actor: me.id, actor_login: me.login, action, target_user: u.id, target_login: u.login, details: details || "",
+    });
   }
   async function adminDeleteChat(c) {
     if (!window.confirm(`Удалить «${c.title}» безвозвратно вместе со всеми сообщениями?`)) return;
-    const { error } = await supabase.rpc("admin_delete_chat", { cid: c.id });
-    if (error) { notify(`Не удалось: ${error.message}`); return; }
+    const { error } = await supabase.from("chats").delete().eq("id", c.id);
+    if (error) { notify(`Не удалось: ${error.message}. Возможно, эта группа защищена.`); return; }
     setAdminChats((l) => l.filter((x) => x.id !== c.id));
     setChats((cs) => cs.filter((x) => x.id !== c.id));
     notify("Удалено");
@@ -1705,7 +1783,12 @@ export default function App() {
     return () => clearInterval(t);
   }, [recording]);
 
+  function rememberReact(emoji) {
+    const rec = [emoji, ...(prefs.recentReacts || []).filter((e) => e !== emoji)].slice(0, 8);
+    setPrefsAnd({ recentReacts: rec });
+  }
   async function toggleReaction(msg, emoji) {
+    rememberReact(emoji);
     const r = { ...(msg.reactions || {}) };
     const list = r[emoji] || [];
     r[emoji] = list.includes(me.id) ? list.filter((x) => x !== me.id) : [...list, me.id];
@@ -1845,7 +1928,14 @@ export default function App() {
     if (o?.banner_img) return { backgroundImage: `url(${o.banner_img})`, backgroundSize: "cover", backgroundPosition: "center" };
     return parseFill(o?.banner_color) || { background: BANNERS[o?.banner] || BANNERS[0] };
   };
+  const wpIsImg = prefs.wallpaper === "custom" && prefs.customWallpaper;
   const wpCss = prefs.wallpaper === "custom" ? (prefs.customWallpaper ? `url(${prefs.customWallpaper})` : "") : WALLPAPERS[prefs.wallpaper]?.css || "";
+  const wpStyle = wpIsImg
+    ? { backgroundImage: `url(${prefs.customWallpaper})`,
+        backgroundSize: prefs.wpFit === "stretch" ? "100% 100%" : prefs.wpFit === "tile" ? "auto" : "cover",
+        backgroundRepeat: prefs.wpFit === "tile" ? "repeat" : "no-repeat",
+        backgroundPosition: "center" }
+    : (wpCss ? { background: wpCss } : {});
   const sortedChats = useMemo(() => chats.filter((c) => !c.is_feedback).sort((a, b) => {
     const pa = (prefs.pinned || []).includes(a.id) ? 1 : 0;
     const pb = (prefs.pinned || []).includes(b.id) ? 1 : 0;
@@ -2018,8 +2108,16 @@ export default function App() {
         } else setCrop({ src: URL.createObjectURL(f), kind: "group" });
       }} />
 
+      <input ref={sideBgInp} type="file" accept="image/*" hidden onChange={async (e) => {
+        const f = e.target.files[0]; e.target.value = "";
+        if (!f) return;
+        try {
+          const b64 = f.type === "image/gif" ? await fileToB64(f) : await blobToB64(await resizeToBlob(f, 900, 0.7));
+          setPrefsAnd({ sideBg: b64 });
+        } catch { notify("Не удалось загрузить фон."); }
+      }} />
       {/* ЛЕВАЯ ПАНЕЛЬ */}
-      <div className="side">
+      <div className="side" style={prefs.sideBg ? { backgroundImage: `url(${prefs.sideBg})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}>
         <div className="side-top">
           <button className="icon-btn" title="Меню" onClick={() => setShowMenu(true)}>{btnIcon("menu", "☰")}</button>
           <input className="search-input" placeholder="Поиск: @тег, канал или сообщение…" value={userQuery}
@@ -2187,21 +2285,40 @@ export default function App() {
 
           {(() => {
             const pins = activeChat.pinned_msgs?.length ? activeChat.pinned_msgs : (activeChat.pinned_msg ? [activeChat.pinned_msg] : []);
-            return pins.map((pid) => {
-              const pm = activeMsgs.find((m) => m.id === pid);
-              return pm ? (
-                <div className="pin-bar" key={pid}>📌 <span onClick={() => scrollToMsg(pm.id)} style={{ cursor: "pointer" }} title="Перейти к сообщению"><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
-                  <button className="icon-btn" style={{ fontSize: 13 }} onClick={() => pinMsg(pm)}>✕</button></div>
-              ) : null;
-            });
+            if (!pins.length) return null;
+            const idx = Math.min(activePinIdx, pins.length - 1);
+            const pm = activeMsgs.find((m) => m.id === pins[idx]);
+            if (!pm) return null;
+            return (
+              <div className="pin-bar">
+                📌
+                <span onClick={() => scrollToMsg(pm.id)} style={{ cursor: "pointer", flex: 1 }} title="Перейти к сообщению">
+                  <b style={{ color: "var(--accent)" }}>{senderName(pm)}{pins.length > 1 ? ` · ${idx + 1}/${pins.length}` : ""}:</b> {previewOf(pm)}
+                </span>
+                {pins.length > 1 && <button className="icon-btn" style={{ fontSize: 14 }} title="Все закреплённые" onClick={() => setShowPinList(true)}>≡</button>}
+                <button className="icon-btn" style={{ fontSize: 13 }} title="Открепить" onClick={() => pinMsg(pm)}>✕</button>
+              </div>
+            );
           })()}
 
           {!isGroup && peer && peer.id !== me.id && blocked.has(peer.id) && (
             <div className="pin-bar" style={{ borderLeftColor: "#D9534F" }}>🚫 <span>Вы заблокировали этого пользователя — он не сможет вам написать.</span>
               <button className="chip" onClick={() => toggleBlock(peer)}>Разблокировать</button></div>
           )}
-          <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={{ background: wpCss || undefined }}
-            onScroll={(e) => { const el = e.target; setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 600); }}
+          <div className={`msgs${wpCss ? " has-wp" : ""}`} ref={msgsRef} style={wpStyle}
+            onScroll={(e) => {
+              const el = e.target;
+              setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 600);
+              const pins = activeChat.pinned_msgs?.length ? activeChat.pinned_msgs : (activeChat.pinned_msg ? [activeChat.pinned_msg] : []);
+              if (pins.length > 1) {
+                let idx = 0;
+                for (let k = 0; k < pins.length; k++) {
+                  const el2 = msgRefs.current[pins[k]];
+                  if (el2 && el2.offsetTop <= el.scrollTop + 80) idx = k;
+                }
+                setActivePinIdx(idx);
+              }
+            }}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => { e.preventDefault(); routeFile(e.dataTransfer.files?.[0]); }}>
             {(chatSearch ? activeMsgs.filter((m) => m.type === "text" && m.content.toLowerCase().includes(chatSearch.toLowerCase())) : activeMsgs).map((m, i, arr) => {
@@ -2337,22 +2454,42 @@ export default function App() {
                   </div>
                 ) : null;
               })()}
-              {showStickers && (
-                <div className="emoji-pop">
-                  <button className="pop-x" onClick={() => setShowStickers(false)}>✕</button>
-                  <input ref={stickerInp} type="file" accept="image/*" hidden onChange={(e) => { addSticker(e.target.files[0]); e.target.value = ""; }} />
-                  <div className="sticker-grid">
-                    {(prefs.stickers || []).map((url, i) => (
-                      <div className="sticker-cell" key={i}>
-                        <img src={url} alt="" onClick={() => sendSticker(url)} />
-                        <button className="st-del" onClick={(ev) => { ev.stopPropagation(); setPrefsAnd({ stickers: prefs.stickers.filter((_, k) => k !== i) }); }}>✕</button>
+              {showStickers && (() => {
+                const packs = stickerPacks();
+                const pIdx = Math.min(activePack, Math.max(0, packs.length - 1));
+                const pack = packs[pIdx];
+                return (
+                  <div className="sticker-panel">
+                    <div className="sticker-panel-head">
+                      <div className="sticker-tabs">
+                        {packs.map((pk, i) => (
+                          <button key={pk.id} className={`sticker-tab${i === pIdx ? " on" : ""}`} onClick={() => setActivePack(i)}>{pk.name}</button>
+                        ))}
+                        <button className="sticker-tab" onClick={newStickerPack}>＋ пак</button>
                       </div>
-                    ))}
-                    <button className="sticker-add" onClick={() => stickerInp.current?.click()}>＋</button>
+                      <button className="pop-x" style={{ position: "static" }} onClick={() => setShowStickers(false)}>✕</button>
+                    </div>
+                    <input ref={stickerInp} type="file" accept="image/*" hidden onChange={(e) => { addStickerToPack(e.target.files[0], pIdx); e.target.value = ""; }} />
+                    {pack ? (
+                      <div className="sticker-grid-big">
+                        {pack.items.map((url, i) => (
+                          <div className="sticker-cell" key={i}>
+                            <img src={url} alt="" onClick={() => sendSticker(url)} />
+                            <button className="st-del" onClick={(ev) => { ev.stopPropagation(); delStickerFromPack(pIdx, i); }}>✕</button>
+                          </div>
+                        ))}
+                        <button className="sticker-add" onClick={() => stickerInp.current?.click()}>＋</button>
+                      </div>
+                    ) : (
+                      <div style={{ padding: 24, textAlign: "center" }}>
+                        <p className="muted" style={{ fontSize: 13.5 }}>Создайте свой первый стикерпак</p>
+                        <button className="btn" style={{ marginTop: 8 }} onClick={newStickerPack}>＋ Новый стикерпак</button>
+                      </div>
+                    )}
+                    {pack && <button className="sticker-pack-del" onClick={() => delStickerPack(pIdx)}>🗑 Удалить пак «{pack.name}»</button>}
                   </div>
-                  {!(prefs.stickers || []).length && <p className="muted" style={{ textAlign: "center", padding: 10, fontSize: 13 }}>Добавьте свои стикеры кнопкой ＋ (картинка или GIF)</p>}
-                </div>
-              )}
+                );
+              })()}
               {showEmoji && (
                 <div className="emoji-pop">
                   <button className="pop-x" onClick={() => setShowEmoji(false)}>✕</button>
@@ -2428,8 +2565,8 @@ export default function App() {
           <button className="d-row" onClick={() => { setShowCalls(true); }}><span className="d-ic">📞</span> {t("Звонки")}</button>
           <button className="d-row" onClick={() => { setShowMenu(false); openFavorites(); }}><span className="d-ic">🔖</span> {t("Избранное")}</button>
           <button className="d-row" onClick={openFeedback}><span className="d-ic">📮</span> {t("Обратная связь")}</button>
-          {amAppAdmin && <button className="d-row" onClick={openAdmin}><span className="d-ic">🛡</span> Админ-панель</button>}
-          {amAppAdmin && <button className="d-row" onClick={openReports}><span className="d-ic">🚩</span> Жалобы</button>}
+          {amStaff && <button className="d-row" onClick={openAdmin}><span className="d-ic">🛡</span> {amAppAdmin ? "Админ-панель" : "Панель модератора"}</button>}
+          {amStaff && <button className="d-row" onClick={openReports}><span className="d-ic">🚩</span> Жалобы</button>}
           <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> {t("Статистика")}</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
           <button className="d-row" onClick={openMarket}><span className="d-ic">🛍</span> {t("Маркет тем")}</button>
@@ -2555,7 +2692,7 @@ export default function App() {
       {menu && (
         <div className="menu" style={{ left: menu.x, top: menu.y }} onClick={(e) => e.stopPropagation()}>
           <div className="rx">
-            {REACTIONS.map((e) => <button key={e} onClick={() => toggleReaction(menu.msg, e)}>{e}</button>)}
+            {[...(prefs.recentReacts || []), ...REACTIONS.filter((e) => !(prefs.recentReacts || []).includes(e))].slice(0, 8).map((e) => <button key={e} onClick={() => toggleReaction(menu.msg, e)}>{e}</button>)}
             <button title="Другая реакция" onClick={() => { const m = menu.msg; setMenu(null); setReactFor(m); }}>＋</button>
           </div>
           <button onClick={() => { setReplyTo(menu.msg); setMenu(null); taRef.current?.focus(); }}>↩ Ответить</button>
@@ -2977,7 +3114,15 @@ export default function App() {
                     style={{ backgroundImage: prefs.customWallpaper ? `url(${prefs.customWallpaper})` : undefined, backgroundSize: "cover" }}
                     onClick={() => wpInp.current?.click()}>Своя 📁</div>
                 </div>
-                <p className="stat">Свою картинку можно кадрировать, GIF ставится как есть.</p>
+                {prefs.wallpaper === "custom" && prefs.customWallpaper && (
+                  <div className="theme-row" style={{ marginTop: 8 }}>
+                    {[["cover", "Заполнить"], ["stretch", "Растянуть"], ["tile", "Плитка"]].map(([v, l]) => (
+                      <button key={v} className={`btn${prefs.wpFit === v ? "" : " ghost"}`} style={{ padding: "7px 4px", fontSize: 12.5 }}
+                        onClick={() => setPrefsAnd({ wpFit: v })}>{l}</button>
+                    ))}
+                  </div>
+                )}
+                <p className="stat">«Заполнить» — обои подгоняются без искажений (края могут обрезаться), «Растянуть» — точно по экрану, «Плитка» — повтор узора. Картинку можно кадрировать при выборе.</p>
                 <h3>⌨️ Звук печати</h3>
                 <div className="quick-chips">
                   {[[false, "Выкл"], ["classic", "Классика"], ["soft", "Мягкий"], ["mech", "Механика"], ["bubble", "Пузырёк"], ["retro", "Ретро"]].map(([k, l]) => (
@@ -3087,6 +3232,10 @@ export default function App() {
                     e.target.value = ""; notify("Пароль изменён ✓");
                   }} />
                 <p className="stat">Имя и @тег меняются сразу. Логин для входа остаётся прежним.</p>
+                <div style={{ display: "flex", gap: 14, marginTop: 8 }}>
+                  <a href="/privacy.html" target="_blank" rel="noreferrer" style={{ color: "var(--accent)", fontSize: 13 }}>Политика конфиденциальности</a>
+                  <a href="/terms.html" target="_blank" rel="noreferrer" style={{ color: "var(--accent)", fontSize: 13 }}>Условия использования</a>
+                </div>
                 <h3>🔑 Резервный код</h3>
                 <button className="btn ghost" onClick={async () => {
                   const code = Math.random().toString(36).slice(2, 8).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase();
@@ -3264,6 +3413,32 @@ export default function App() {
         </div>
       )}
 
+      {/* СПИСОК ЗАКРЕПЛЁННЫХ */}
+      {showPinList && activeChat && (() => {
+        const pins = activeChat.pinned_msgs?.length ? activeChat.pinned_msgs : (activeChat.pinned_msg ? [activeChat.pinned_msg] : []);
+        return (
+          <div className="overlay" style={{ zIndex: 72 }} onClick={() => setShowPinList(false)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-pad">
+                <h3 style={{ marginTop: 0 }}>📌 Закреплённые ({pins.length})</h3>
+                {pins.map((pid) => {
+                  const pm = activeMsgs.find((m) => m.id === pid);
+                  if (!pm) return null;
+                  return (
+                    <div className="member-row" key={pid} style={{ cursor: "pointer" }}
+                      onClick={() => { setShowPinList(false); scrollToMsg(pm.id); }}>
+                      <span className="mr-name"><b style={{ color: "var(--accent)" }}>{senderName(pm)}:</b> {previewOf(pm)}</span>
+                      <button className="icon-btn" style={{ fontSize: 13 }} onClick={(e) => { e.stopPropagation(); pinMsg(pm); }}>✕</button>
+                    </div>
+                  );
+                })}
+                <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setShowPinList(false)}>Закрыть</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ПРЕДПРОСМОТР ПЕРЕД ОТПРАВКОЙ */}
       {pendingMedia && (
         <div className="overlay" style={{ zIndex: 75 }} onClick={() => setPendingMedia(null)}>
@@ -3284,12 +3459,28 @@ export default function App() {
 
       {/* ЗВОНОК */}
       <audio ref={remoteAudioRef} autoPlay />
-      {call && (
+      {call && callMin && (
+        <div className="call-mini" onClick={() => setCallMin(false)}>
+          <Avatar user={call.peer} size="sm" />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>{call.peer?.login}</div>
+            <div style={{ fontSize: 12, color: "var(--accent)" }}>
+              {call.status === "active"
+                ? (() => { const d = Math.floor((Date.now() - call.startedAt) / 1000); return `${String(Math.floor(d/60)).padStart(2,"0")}:${String(d%60).padStart(2,"0")}`; })()
+                : "Звонок…"}
+            </div>
+          </div>
+          <button className="call-mini-btn" onClick={(e) => { e.stopPropagation(); toggleCallMute(); }}>{callMuted ? "🔇" : "🎙"}</button>
+          <button className="call-mini-btn hang" onClick={(e) => { e.stopPropagation(); endCall(true); }}>📵</button>
+        </div>
+      )}
+      {call && !callMin && (
         <div className="call-screen" style={bannerCss(call.peer)}>
           <div className="call-shade" />
           {call.video && call.status === "active" && (
             <video ref={remoteVideoRef} autoPlay playsInline className="call-remote" />
           )}
+          <button className="call-minimize" onClick={() => setCallMin(true)} title="Свернуть звонок">⌄</button>
           <div className="call-top">
             <Avatar user={call.peer} size="lg" />
             <div className="call-name">{call.peer?.login}</div>
@@ -3532,14 +3723,14 @@ export default function App() {
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-pad">
               {!adminTarget ? (<>
-                <h3 style={{ marginTop: 0 }}>🛡 Админ-панель</h3>
+                <h3 style={{ marginTop: 0 }}>🛡 {amAppAdmin ? "Админ-панель" : "Панель модератора"}</h3>
                 <h3>Пользователи</h3>
                 <input className="field" placeholder="Поиск по @тегу или имени…" value={adminQuery} onChange={(e) => setAdminQuery(e.target.value)} />
                 {(adminResults || []).map((u) => (
                   <div className="member-row" key={u.id} style={{ cursor: "pointer" }} onClick={() => setAdminTarget(u)}>
                     <Avatar user={u} size="sm" online={isOn(u)} />
                     <span className="mr-name">{u.login} <span className="muted">@{u.tag}</span></span>
-                    <span>{u.restrictions?.banned ? "🚫" : Object.keys(u.restrictions || {}).length ? "⚠️" : ""}</span>
+                    <span>{u.is_app_admin ? "👑" : u.is_moderator ? "★" : ""} {u.restrictions?.banned ? "🚫" : Object.keys(u.restrictions || {}).length ? "⚠️" : ""}</span>
                   </div>
                 ))}
                 <h3>Группы и каналы ({adminChats.length})</h3>
@@ -3571,6 +3762,10 @@ export default function App() {
                   </div>
                 ))}
                 <p className="stat">Запреты сообщений, медиа и создания групп работают на уровне базы — обойти их нельзя. Запрет звонков действует в приложении. Бан скрывает мессенджер при следующем входе пользователя.</p>
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button className="btn ghost" style={{ flex: 1 }} onClick={() => warnUser(adminTarget)}>⚠️ Предупредить{adminTarget.warnings ? ` (${adminTarget.warnings})` : ""}</button>
+                  {amAppAdmin && <button className={`btn${adminTarget.is_moderator ? "" : " ghost"}`} style={{ flex: 1 }} onClick={() => toggleModerator(adminTarget)}>{adminTarget.is_moderator ? "★ Снять модератора" : "☆ Сделать модератором"}</button>}
+                </div>
                 <button className="btn ghost" style={{ marginTop: 8 }} onClick={() => setAdminTarget(null)}>← Назад</button>
               </>)}
             </div>
@@ -3702,6 +3897,11 @@ export default function App() {
                   <button className="chip" onClick={() => setPrefsAnd({ uiVars: {} })}>↺ Сбросить цвета</button>
                 </div>
                 <p className="stat">Слева направо: фон чата · панели и шапки · поля · разделители.</p>
+                <h3>Фон списка чатов</h3>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn ghost" style={{ flex: 1 }} onClick={() => sideBgInp.current?.click()}>🖼 Своё изображение</button>
+                  {prefs.sideBg && <button className="btn ghost" style={{ flex: 1 }} onClick={() => setPrefsAnd({ sideBg: null })}>Убрать</button>}
+                </div>
               </div>
 
               <div className="sec">
