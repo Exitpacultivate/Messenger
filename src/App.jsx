@@ -248,6 +248,7 @@ export default function App() {
   const [showAttach, setShowAttach] = useState(false);
   const [emojiTab, setEmojiTab] = useState("😀");
   const [showProfile, setShowProfile] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showChatInfo, setShowChatInfo] = useState(false);
   const [showGroupNew, setShowGroupNew] = useState(false);
   const [groupEdit, setGroupEdit] = useState(false);
@@ -462,7 +463,7 @@ export default function App() {
       const sender = profilesRef.current?.[m.sender_id]?.login || "Новое сообщение";
       const title = ch?.is_group ? `${sender} — ${ch.title || "Группа"}` : sender;
       const body = m.type === "text" ? m.content.slice(0, 80)
-        : ({ photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "Сообщение");
+        : ({ sticker: "🌟 Стикер", photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "Сообщение");
       // Через Service Worker — показывается даже когда вкладка свёрнута/в фоне
       if (navigator.serviceWorker?.controller) {
         navigator.serviceWorker.controller.postMessage({ type: "notify", title, body, tag: m.chat_id });
@@ -885,6 +886,7 @@ export default function App() {
       else if (viewer) setViewer(null);
       else if (reactFor) setReactFor(null);
       else if (showProfile) setShowProfile(false);
+      else if (showSettings) setShowSettings(false);
       else if (showChatInfo) { setShowChatInfo(false); setMediaTab(null); setGroupEdit(false); }
       else if (showGroupNew) setShowGroupNew(false);
       else if (chatSearch !== null) setChatSearch(null);
@@ -892,7 +894,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers, showReports, forwarding, editing]);
+  }, [menu, viewer, reactFor, showProfile, showChatInfo, showGroupNew, chatSearch, showMenu, showContacts, showCalls, statusPick, chatMenu, mentionQuery, showBuilder, builderEmoji, showStats, statUser, showAdmin, adminTarget, showMarket, profilePreview, themeOpen, publishForm, showStickers, showReports, forwarding, editing, showSettings]);
   useEffect(() => {
     if (!activeId) return;
     const onPaste = (e) => {
@@ -962,7 +964,7 @@ export default function App() {
   }
   async function logout() {
     await supabase.auth.signOut();
-    setMe(null); setActiveId(null); setShowProfile(false);
+    setMe(null); setActiveId(null); setShowProfile(false); setShowSettings(false);
     setChats([]); setMessages({}); setMembers({}); setLogin(""); setPass("");
     setPhase("auth");
   }
@@ -1683,7 +1685,7 @@ export default function App() {
   // ---------- СООБЩЕНИЯ ----------
   const senderName = (m) => (m.sender_id === me?.id ? "Вы" : profiles[m.sender_id]?.login || "?");
   const senderColor = (id) => prefs.nickColor || ACCENTS[(id?.charCodeAt(2) || 0) % ACCENTS.length];
-  const previewOf = (m) => m.type === "text" ? m.content.slice(0, 60) : { photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "";
+  const previewOf = (m) => m.type === "text" ? m.content.slice(0, 60) : { sticker: "🌟 Стикер", photo: "📷 Фото", video: "🎬 Видео", file: "📎 Файл", voice: "🎤 Голосовое" }[m.type] || "";
 
   async function sendMessage(payload) {
     if (!activeId || !me) return;
@@ -2393,7 +2395,7 @@ export default function App() {
                         {showAva && <Avatar user={profiles[m.sender_id]} size="xs" />}
                       </div>
                     )}
-                    <div className={`bubble ${out ? "out" : "in"}${flashId === m.id ? " flash" : ""}`}
+                    <div className={`bubble ${out ? "out" : "in"}${flashId === m.id ? " flash" : ""}${m.type === "sticker" ? " sticker-bubble" : ""}`}
                       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openMenuAt(e.clientX, e.clientY, m); }}
                       onDoubleClick={() => toggleReaction(m, "❤️")}
                       onTouchStart={(e) => bubbleTouchStart(e, m)}
@@ -2408,6 +2410,7 @@ export default function App() {
                         </div>
                       )}
                       {m.type === "text" && <MsgText text={m.content} query={chatSearch || ""} onMention={openByTag} />}
+                      {m.type === "sticker" && <img className="b-sticker" src={m.content} alt="стикер" />}
                       {showAsPhoto && <img className="b-img" src={m.content} alt="" onClick={() => setViewer(m.content)} />}
                       {m.type === "video" && <video className="b-img" src={m.content} controls style={{ maxHeight: 280 }} />}
                       {m.type === "file" && !showAsPhoto && (
@@ -2627,7 +2630,7 @@ export default function App() {
           <button className="d-row" onClick={loadStats}><span className="d-ic">📊</span> {t("Статистика")}</button>
           <button className="d-row" onClick={() => { setShowMenu(false); setShowBuilder(true); }}><span className="d-ic">🎛</span> Конструктор</button>
           <button className="d-row" onClick={openMarket}><span className="d-ic">🛍</span> {t("Маркет тем")}</button>
-          <button className="d-row" onClick={() => { setShowMenu(false); setShowProfile(true); }}><span className="d-ic">⚙️</span> {t("Настройки")}</button>
+          <button className="d-row" onClick={() => { setShowMenu(false); setShowSettings(true); }}><span className="d-ic">⚙️</span> {t("Настройки")}</button>
           <button className="d-row" onClick={() => setPrefsAnd({ theme: prefs.theme === "light" ? "dark" : "light" })}>
             <span className="d-ic">🌙</span> {t("Ночной режим")}
             <span className="right"><span className={`toggle${prefs.theme !== "light" ? " on" : ""}`} style={{ display: "inline-block" }} /></span>
@@ -3042,6 +3045,7 @@ export default function App() {
               <div style={{ fontWeight: 700, fontSize: 19, color: me.name_color || undefined }}>{me.login}</div>
               <div className="muted" style={{ fontSize: 14, marginBottom: 10 }}>@{me.tag} · нажмите на аватар, чтобы сменить</div>
               <button className="btn ghost" style={{ marginBottom: 10 }} onClick={() => setProfilePreview(true)}>👁 Предпросмотр профиля</button>
+              <button className="btn ghost" style={{ marginBottom: 10 }} onClick={() => { setShowProfile(false); setShowSettings(true); }}>⚙️ Открыть настройки</button>
 
               <div className="sec">
                 <h3>Профиль</h3>
@@ -3133,6 +3137,20 @@ export default function App() {
                 })()}
                 <p className="stat">Первый кружок — фон карточки под баннером, второй — цвет имени. Это видят все, кто откроет ваш профиль.</p>
                 <p className="stat">Чатов: {chats.length} · Регистрация: {me.created_at ? new Date(me.created_at).toLocaleDateString("ru-RU") : "—"}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* НАСТРОЙКИ */}
+      {showSettings && (
+        <div className="overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-pad">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <i className="ti" />
+                <h3 style={{ margin: 0 }}>⚙️ Настройки</h3>
               </div>
 
               <div className="sec">
@@ -3230,7 +3248,7 @@ export default function App() {
                 ))}
               </div>
 
-              {amAppAdmin && (
+              {false && (
                 <div className="sec">
                   <h3>📢 Админ мессенджера</h3>
                   <input className="field" placeholder="Текст объявления" maxLength={120} value={annText}
@@ -3837,6 +3855,27 @@ export default function App() {
             <div className="modal-pad">
               {!adminTarget ? (<>
                 <h3 style={{ marginTop: 0 }}>🛡 {amAppAdmin ? "Админ-панель" : "Панель модератора"}</h3>
+                {amAppAdmin && (
+                  <div className="sec" style={{ marginBottom: 12 }}>
+                    <h3>📢 Объявление для всех</h3>
+                    <input className="field" placeholder="Текст объявления" maxLength={120} value={annText} onChange={(e) => setAnnText(e.target.value)} />
+                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <button className="btn" style={{ flex: 1 }} disabled={!annText.trim()}
+                        onClick={async () => {
+                          const ts = new Date().toISOString();
+                          const { error } = await supabase.from("app_settings").update({ announcement: annText.trim(), announcement_at: ts }).eq("id", 1);
+                          if (error) notify("Не удалось: " + error.message);
+                          else { setAppSettings((st) => ({ ...st, announcement: annText.trim(), announcement_at: ts })); setAnnText(""); notify("Объявление опубликовано ✓"); }
+                        }}>Опубликовать</button>
+                      <button className="btn ghost" style={{ flex: 1 }}
+                        onClick={async () => {
+                          const { error } = await supabase.from("app_settings").update({ announcement: null }).eq("id", 1);
+                          if (error) notify("Не удалось: " + error.message);
+                          else { setAppSettings((st) => ({ ...st, announcement: null })); notify("Объявление снято"); }
+                        }}>Снять</button>
+                    </div>
+                  </div>
+                )}
                 <h3>Пользователи</h3>
                 <input className="field" placeholder="Поиск по @тегу или имени…" value={adminQuery} onChange={(e) => setAdminQuery(e.target.value)} />
                 {(adminResults || []).map((u) => (
